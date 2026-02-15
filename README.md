@@ -173,3 +173,20 @@ Manual:
 ./bin/continuous-smoke 75
 ./bin/scale-smoke 8 60 39600
 ```
+
+## Demos
+
+Two players:
+```bash
+./bin/demo-federation-tmux twansi-demo
+tmux attach -t twansi-demo
+```
+
+Four players + 4 bots:
+```bash
+./bin/demo-4p twansi-4p
+tmux attach -t twansi-4p
+```
+
+Agent API docs:
+- `docs/agent_api.md`
