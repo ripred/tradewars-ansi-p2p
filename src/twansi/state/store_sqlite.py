@@ -701,6 +701,16 @@ class Store:
             out.append(d)
         return out
 
+    def recent_events(self, limit: int = 80) -> list[dict[str, Any]]:
+        limit = max(0, min(500, int(limit)))
+        rows = self.db.execute("SELECT * FROM event_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        out = []
+        for r in reversed(rows):
+            d = dict(r)
+            d["payload"] = json.loads(d["payload"])
+            out.append(d)
+        return out
+
     def get_digest_cursor(self, player_id: str) -> int:
         row = self.db.execute("SELECT last_event_id FROM digest_cursor WHERE player_id=?", (player_id,)).fetchone()
         return int(row[0]) if row else 0
