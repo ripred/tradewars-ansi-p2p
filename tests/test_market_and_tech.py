@@ -30,6 +30,18 @@ class MarketTechTest(unittest.TestCase):
             lv = s.get_tech_levels(pid)
             self.assertEqual(lv["mining"], 1)
 
+    def test_tier_prerequisites(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            s = Store(f"{td}/db.sqlite")
+            pid = "p2"
+            s.ensure_player(pid, "pilot2")
+            with self.assertRaises(ValueError):
+                upgrade_tech(s, pid, "weapons")
+            hull = upgrade_tech(s, pid, "ship_hull")
+            self.assertEqual(hull["to_tier"], 1)
+            weap = upgrade_tech(s, pid, "weapons")
+            self.assertEqual(weap["to_tier"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,8 @@ import hashlib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from twansi.policy import derive_shard_key, load_policy
+
 
 @dataclass
 class Profile:
@@ -15,6 +17,7 @@ class Profile:
     listen_port: int = 39000
     shard: str = "alpha"
     seed_peers: list[str] = field(default_factory=list)
+    bootstrap_url: str = ""
     secret: str = ""
     shard_key: str = ""
     data_dir: str = ""
@@ -24,8 +27,12 @@ class Profile:
         if not self.secret:
             self.secret = secrets.token_hex(32)
         if not self.shard_key:
-            # Default shared auth key per shard so independently initialized peers can interoperate.
-            self.shard_key = hashlib.sha256(f"twansi:{self.shard}".encode("utf-8")).hexdigest()
+            # Default shared auth key derived from repo policy epoch.
+            # Operators can add a private salt via TWANSI_SHARD_SECRET to prevent casual spoofing.
+            pol = load_policy()
+            self.shard_key = derive_shard_key(self.shard, pol.protocol_epoch)
+        if not self.bootstrap_url:
+            self.bootstrap_url = os.environ.get(\"TWANSI_BOOTSTRAP_URL\", \"https://twansi.trentwyatt.com/bootstrap.json\")
 
 
 def twansi_home() -> Path:

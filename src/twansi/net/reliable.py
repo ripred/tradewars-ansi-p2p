@@ -26,12 +26,14 @@ class ReliableMesh:
         auth: ShardAuthenticator,
         sender_id: str,
         shard: str,
+        epoch: int,
         on_message: Callable[[dict[str, Any], tuple[str, int]], None],
     ):
         self.transport = transport
         self.auth = auth
         self.sender_id = sender_id
         self.shard = shard
+        self.epoch = int(epoch)
         self.on_message = on_message
 
         self.next_seq = 1
@@ -98,6 +100,7 @@ class ReliableMesh:
             ack=ack,
             ack_bits=ack_bits,
             shard=self.shard,
+            epoch=self.epoch,
             payload=payload,
             reliable=reliable,
         )
@@ -118,6 +121,7 @@ class ReliableMesh:
             ack=ack,
             ack_bits=ack_bits,
             shard=self.shard,
+            epoch=self.epoch,
             payload=payload,
             reliable=reliable,
         )
@@ -142,6 +146,8 @@ class ReliableMesh:
                 continue
             if msg.get("shard") != self.shard:
                 continue
+            if int(msg.get("epoch", -1)) != self.epoch:
+                continue
 
             sender = str(msg.get("sender", ""))
             seq = int(msg.get("seq", 0))
@@ -160,6 +166,7 @@ class ReliableMesh:
                     ack=self.highest_remote_seq.get(sender, 0),
                     ack_bits=self.recv_window.get(sender, 0),
                     shard=self.shard,
+                    epoch=self.epoch,
                     payload={"for": seq},
                     ack_only=True,
                 )

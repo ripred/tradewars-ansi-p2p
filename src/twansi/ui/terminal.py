@@ -95,19 +95,33 @@ class Dashboard:
             prices = state.get("market", {}).get("prices", {})
             if prices:
                 mlines.append(f"Market O:{prices.get('ore',0)} G:{prices.get('gas',0)} C:{prices.get('crystal',0)}")
-            tech = state.get("tech", {})
-            if tech:
+            station = state.get("station", {})
+            if station:
+                sp = station.get("prices", {})
+                st = station.get("stock", {})
+                mlines.append(
+                    f"Station(sec {station.get('sector_id','?')}) O:{sp.get('ore',0)}/{st.get('ore',0)} "
+                    f"G:{sp.get('gas',0)}/{st.get('gas',0)} C:{sp.get('crystal',0)}/{st.get('crystal',0)}"
+                )
+            tech_levels = state.get("tech", {}).get("levels", {})
+            if tech_levels:
                 mlines.append(
                     "Tech H:{ship_hull} W:{weapons} S:{shields} M:{mining} D:{defense_grid}".format(
-                        ship_hull=tech.get("ship_hull", 0),
-                        weapons=tech.get("weapons", 0),
-                        shields=tech.get("shields", 0),
-                        mining=tech.get("mining", 0),
-                        defense_grid=tech.get("defense_grid", 0),
+                        ship_hull=tech_levels.get("ship_hull", 0),
+                        weapons=tech_levels.get("weapons", 0),
+                        shields=tech_levels.get("shields", 0),
+                        mining=tech_levels.get("mining", 0),
+                        defense_grid=tech_levels.get("defense_grid", 0),
                     )
                 )
+            ship = state.get("ship", {})
+            if ship:
+                mlines.append(
+                    f"Ship HPmax:{ship.get('max_hp',0)} Cargo:{ship.get('cargo_used',0)}/{ship.get('cargo_capacity',0)} "
+                    f"Spd:{ship.get('speed',1.0)}"
+                )
             if self.show_help:
-                mlines.extend(["", "Keys: q quit | m mine | a attack | s scan | i invite | d digest | b buy ore | n sell ore | u upgrade | +/- zoom | h help"])
+                mlines.extend(["", "Keys: q quit | m mine | a attack | s scan | i invite | d digest | b buy ore | n sell ore | u upgrade | j jump | +/- zoom | h help"])
             self._draw_lines(w_metrics, mlines, Palette.WARN)
 
             self._draw_box(w_radar, "RADAR", Palette.TITLE)

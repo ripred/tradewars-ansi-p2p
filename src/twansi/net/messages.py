@@ -20,6 +20,7 @@ def make_envelope(
     ack: int,
     ack_bits: int,
     shard: str,
+    epoch: int,
     payload: dict[str, Any],
     reliable: bool = False,
     ack_only: bool = False,
@@ -38,6 +39,7 @@ def make_envelope(
         "ack_bits": ack_bits,
         "ts": int(time.time() * 1000),
         "shard": shard,
+        "epoch": int(epoch),
         "flags": flags,
         "payload": payload,
     }

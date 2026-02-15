@@ -1,0 +1,16 @@
+{
+  "min_protocol_version": 1,
+  "max_protocol_version": 1,
+  "protocol_epoch": 1,
+  "max_event_hops": 2,
+  "reliable_event_types": [
+    "battle",
+    "market_trade",
+    "tech_upgrade",
+    "jump",
+    "alliance_join"
+  ],
+  "rate_limits": {
+    "packets_per_sec": 120
+  }
+}

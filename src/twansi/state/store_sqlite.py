@@ -5,6 +5,7 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Any
+import random
 
 
 class Store:
@@ -84,6 +85,12 @@ class Store:
                 price INTEGER NOT NULL,
                 updated_ts REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS station_inventory (
+                sector_id INTEGER NOT NULL,
+                resource TEXT NOT NULL,
+                stock INTEGER NOT NULL,
+                PRIMARY KEY(sector_id, resource)
+            );
             CREATE TABLE IF NOT EXISTS tech_tree (
                 player_id TEXT NOT NULL,
                 domain TEXT NOT NULL,
@@ -94,6 +101,7 @@ class Store:
         )
         self._migrate_players_table()
         self._init_market()
+        self._init_stations()
         self.db.commit()
 
     def _migrate_players_table(self) -> None:
@@ -137,6 +145,124 @@ class Store:
                 "INSERT OR IGNORE INTO market_state(resource,price,updated_ts) VALUES(?,?,?)",
                 (res, price, now),
             )
+
+    def _init_stations(self) -> None:
+        # Lazy per-sector station inventory. We don't know sector count here; callers should
+        # call ensure_station_inventory(sector_id).
+        return
+
+    def ensure_station_inventory(self, sector_id: int, richness: int | None = None, danger: int | None = None) -> None:
+        sector_id = int(sector_id)
+        row = self.db.execute("SELECT 1 FROM station_inventory WHERE sector_id=? LIMIT 1", (sector_id,)).fetchone()
+        if row:
+            return
+        if richness is None or danger is None:
+            s = self.get_sector(sector_id) or {"richness": 4, "danger": 5}
+            richness = int(s.get("richness", 4))
+            danger = int(s.get("danger", 5))
+        base = 420 + richness * 60 - danger * 10
+        base = max(120, base)
+        for res, mult in (("ore", 1.2), ("gas", 1.0), ("crystal", 0.8)):
+            stock = int(base * mult) + random.randint(0, 50)
+            self.db.execute(
+                "INSERT OR IGNORE INTO station_inventory(sector_id,resource,stock) VALUES(?,?,?)",
+                (sector_id, res, stock),
+            )
+        self.db.commit()
+
+    def station_modifier(self, sector_id: int) -> float:
+        s = self.get_sector(int(sector_id)) or {"richness": 4, "danger": 5}
+        richness = int(s.get("richness", 4))
+        danger = int(s.get("danger", 5))
+        mod = 1.0 + (danger - 5) * 0.03 - (richness - 4) * 0.02
+        return max(0.7, min(1.4, mod))
+
+    def station_market(self, sector_id: int) -> dict[str, Any]:
+        sector_id = int(sector_id)
+        self.ensure_station_inventory(sector_id)
+        base = self.get_market_prices()
+        mod = self.station_modifier(sector_id)
+        rows = self.db.execute("SELECT resource,stock FROM station_inventory WHERE sector_id=?", (sector_id,)).fetchall()
+        inv = {str(r[0]): int(r[1]) for r in rows}
+        prices: dict[str, int] = {}
+        for res, base_price in base.items():
+            stock = inv.get(res, 0)
+            scarcity = 1.0
+            if stock < 120:
+                scarcity = 1.25
+            elif stock > 650:
+                scarcity = 0.9
+            prices[res] = max(1, int(round(base_price * mod * scarcity)))
+        return {"sector_id": sector_id, "modifier": mod, "prices": prices, "stock": inv}
+
+    def station_trade(self, player_id: str, sector_id: int, resource: str, qty: int, side: str) -> dict[str, Any]:
+        resource = resource.lower()
+        if resource not in ("ore", "gas", "crystal"):
+            raise ValueError("invalid resource")
+        qty = max(1, int(qty))
+        side = side.lower()
+        sector_id = int(sector_id)
+
+        mkt = self.station_market(sector_id)
+        unit_price = int(mkt["prices"][resource])
+        stock = int(mkt["stock"][resource])
+
+        p = self.get_player(player_id)
+        if not p:
+            raise ValueError("player not found")
+        if int(p["sector"]) != sector_id:
+            raise ValueError("not in that sector")
+
+        gross = unit_price * qty
+        fee = max(1, gross // 30)
+
+        if side == "buy":
+            if stock < qty:
+                raise ValueError("station out of stock")
+            total = gross + fee
+            if int(p["credits"]) < total:
+                raise ValueError("insufficient credits")
+            self.db.execute(
+                f"UPDATE players SET credits=credits-?, {resource}={resource}+?, updated_ts=? WHERE player_id=?",
+                (total, qty, time.time(), player_id),
+            )
+            self.db.execute(
+                "UPDATE station_inventory SET stock=stock-? WHERE sector_id=? AND resource=?",
+                (qty, sector_id, resource),
+            )
+            self.db.commit()
+            return {
+                "side": side,
+                "sector_id": sector_id,
+                "resource": resource,
+                "qty": qty,
+                "unit_price": unit_price,
+                "fee": fee,
+                "credits_delta": -total,
+            }
+        if side == "sell":
+            if int(p[resource]) < qty:
+                raise ValueError("insufficient inventory")
+            proceeds = max(1, gross - fee)
+            self.db.execute(
+                f"UPDATE players SET credits=credits+?, {resource}={resource}-?, updated_ts=? WHERE player_id=?",
+                (proceeds, qty, time.time(), player_id),
+            )
+            self.db.execute(
+                "UPDATE station_inventory SET stock=stock+? WHERE sector_id=? AND resource=?",
+                (qty, sector_id, resource),
+            )
+            self.db.commit()
+            return {
+                "side": side,
+                "sector_id": sector_id,
+                "resource": resource,
+                "qty": qty,
+                "unit_price": unit_price,
+                "fee": fee,
+                "credits_delta": proceeds,
+            }
+        raise ValueError("invalid side")
 
     def get_market_prices(self) -> dict[str, int]:
         rows = self.db.execute("SELECT resource,price FROM market_state").fetchall()

@@ -16,6 +16,7 @@ class ProtocolTest(unittest.TestCase):
             ack=0,
             ack_bits=0,
             shard="alpha",
+            epoch=1,
             payload={"nick": "cap"},
             reliable=False,
         )

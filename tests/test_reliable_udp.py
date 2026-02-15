@@ -20,7 +20,7 @@ class DummyTransport:
 class ReliableTest(unittest.TestCase):
     def test_ack_removes_pending(self) -> None:
         tr = DummyTransport()
-        mesh = ReliableMesh(tr, ShardAuthenticator("01" * 32), "sender", "alpha", lambda *_: None)
+        mesh = ReliableMesh(tr, ShardAuthenticator("01" * 32), "sender", "alpha", 1, lambda *_: None)
         seq = mesh.send("PING", {"x": 1}, ("127.0.0.1", 1), reliable=True)
         self.assertIn(seq, mesh.pending)
         mesh._apply_ack(seq, 0)

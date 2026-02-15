@@ -9,6 +9,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
 
@@ -17,13 +18,16 @@ from twansi.game.alliances import create_alliance, join_alliance, player_allianc
 from twansi.game.mapgen import ensure_map
 from twansi.game.market import drift_market, market_snapshot
 from twansi.game.rules import RESOURCE_TICK_SECONDS, STRATEGIC_TICK_SECONDS
-from twansi.game.tech import TECH_DOMAINS, upgrade_tech
+from twansi.game.tech import TECH_DOMAINS, can_upgrade, tech_tree_spec, tier_cost, upgrade_tech
 from twansi.game.tick import GameEngine
+from twansi.game.ship import ship_stats
 from twansi.identity import Identity, ShardAuthenticator
 from twansi.net.membership import Membership
 from twansi.net.netsplit import NetsplitTracker
 from twansi.net.reliable import ReliableMesh
 from twansi.net.transport_udp import UDPTransport
+from twansi.net.bootstrap import dns_srv_seeds, fetch_bootstrap, merge_seeds, read_cached, write_cached
+from twansi.policy import load_policy, derive_shard_key
 from twansi.sim.bots import main as bot_main
 from twansi.state.digest import build_offline_digest
 from twansi.state.eventlog import compact_event, event_id
@@ -42,8 +46,10 @@ class RuntimeState:
 class GameNode:
     def __init__(self, profile: Profile):
         self.profile = profile
+        self.policy = load_policy()
         self.identity = Identity(profile.secret)
-        self.shard_auth = ShardAuthenticator(profile.shard_key)
+        shard_key = profile.shard_key or derive_shard_key(profile.shard, self.policy.protocol_epoch)
+        self.shard_auth = ShardAuthenticator(shard_key)
         self.store = Store(profile.db_path)
         ensure_map(self.store, sectors=96)
         self.store.ensure_player(self.identity.sender_id, profile.nick, doctrine=random.choice(["assault", "siege", "defense"]))
@@ -59,6 +65,7 @@ class GameNode:
             auth=self.shard_auth,
             sender_id=self.identity.sender_id,
             shard=profile.shard,
+            epoch=self.policy.protocol_epoch,
             on_message=self.on_net_message,
         )
 
@@ -71,6 +78,7 @@ class GameNode:
         self.last_strategic_tick = time.time()
         self.last_announce_second = -1
         self.last_snapshot_second = -1
+        self.last_bootstrap_ts = 0.0
         self.agent_server_port = int(os.environ.get("TWANSI_AGENT_PORT", str(profile.listen_port + 100)))
         self.radar_zoom = 1.0
         self.server: asyncio.AbstractServer | None = None
@@ -91,6 +99,7 @@ class GameNode:
         player = self.store.get_player(self.identity.sender_id) or {}
         healthy = self.membership.healthy()
         self.netsplit.tick(len(healthy))
+        tech_levels = self.store.get_tech_levels(self.identity.sender_id)
         contacts: list[dict[str, Any]] = []
         for p in healthy:
             rp = self.store.get_player(p.peer_id)
@@ -108,7 +117,12 @@ class GameNode:
             "player": player,
             "contacts": contacts,
             "market": market_snapshot(self.store),
-            "tech": self.store.get_tech_levels(self.identity.sender_id),
+            "station": self.store.station_market(int(player.get("sector", 1))) if player else {},
+            "tech": {
+                "levels": tech_levels,
+                "tree": self._tech_tree_view(tech_levels),
+            },
+            "ship": ship_stats(player, tech_levels) if player else {},
             "metrics": {
                 "peer_count": len(healthy),
                 "events_seen": self.runtime.events_seen,
@@ -121,17 +135,35 @@ class GameNode:
             "new_events": self.drain_new_events(),
         }
 
+    def _tech_tree_view(self, levels: dict[str, int]) -> dict[str, dict[str, Any]]:
+        spec = tech_tree_spec()
+        out: dict[str, dict[str, Any]] = {}
+        for domain, cfg in spec.items():
+            cur = int(levels.get(domain, 0))
+            next_tier = cur + 1
+            allowed, reason = can_upgrade(levels, domain, next_tier)
+            out[domain] = {
+                "name": cfg.get("name", domain),
+                "tier": cur,
+                "max_tier": int(cfg.get("max_tier", 8)),
+                "requires": cfg.get("requires", {}),
+                "next_cost": tier_cost(cur) if allowed else None,
+                "upgrade_ready": allowed,
+                "blocked_reason": "" if allowed else reason,
+            }
+        return out
+
     def enqueue_command(self, cmd: str) -> None:
         self.command_queue.put(cmd)
 
-    def _fanout_events(self, events: list[dict[str, Any]], exclude_peer_ids: set[str] | None = None) -> None:
+    def _fanout_events(self, events: list[dict[str, Any]], exclude_peer_ids: set[str] | None = None, reliable: bool = True) -> None:
         peers = [p for p in self.membership.healthy(max_age=240) if (exclude_peer_ids is None or p.peer_id not in exclude_peer_ids)]
         if not peers:
-            self.mesh.broadcast("EVENT_BATCH", {"events": events}, port=self.profile.listen_port, reliable=True)
+            self.mesh.broadcast("EVENT_BATCH", {"events": events}, port=self.profile.listen_port, reliable=reliable)
             return
         fanout = min(len(peers), max(3, int(math.sqrt(len(peers))) + 1))
         for p in random.sample(peers, fanout):
-            self.mesh.send("EVENT_BATCH", {"events": events}, (p.host, p.port), reliable=True)
+            self.mesh.send("EVENT_BATCH", {"events": events}, (p.host, p.port), reliable=reliable)
 
     def _emit_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.local_event_counter += 1
@@ -139,7 +171,9 @@ class GameNode:
         self.store.record_event(self.identity.sender_id, event_type, payload, eid)
         ce = compact_event(event_type, payload, self.identity.sender_id, eid)
         ce["hops"] = 0
-        self._fanout_events([ce])
+        # Avoid reliable spam for high-frequency/low-stakes updates.
+        reliable = event_type not in {"movement", "repair_tick"}
+        self._fanout_events([ce], reliable=reliable)
         self.log_event(f"{event_type}: {payload}")
         return ce
 
@@ -217,6 +251,11 @@ class GameNode:
             domain = str(payload.get("domain", "ship_hull"))
             tier = int(payload.get("to_tier", 0))
             self.store.set_tech_level(pid, domain, tier)
+        elif et == "jump" and pid:
+            self.store.ensure_player(pid, payload.get("nick", pid[:8]))
+            to_sector = int(payload.get("to", 1))
+            self.store.set_player_sector(pid, to_sector)
+            self.store.set_player_motion(pid, 0.0, 0.0, 0.0, 0.0)
 
         self.log_event(f"remote/{et}: {payload}")
 
@@ -225,12 +264,21 @@ class GameNode:
         if hops < 2:
             fwd = dict(ev)
             fwd["hops"] = hops + 1
-            self._fanout_events([fwd], exclude_peer_ids={sender})
+            reliable = str(fwd.get("event_type", "")) not in {"movement", "repair_tick"}
+            self._fanout_events([fwd], exclude_peer_ids={sender}, reliable=reliable)
 
     def on_net_message(self, msg: dict[str, Any], addr: tuple[str, int]) -> None:
         mtype = str(msg.get("type", ""))
         payload = dict(msg.get("payload", {}))
         sender = str(msg.get("sender", ""))
+        v = int(msg.get("v", 0))
+        epoch = int(msg.get("epoch", -1))
+
+        # Enforce repo policy: protocol version and current epoch.
+        if v < self.policy.min_protocol_version or v > self.policy.max_protocol_version:
+            return
+        if epoch != self.policy.protocol_epoch:
+            return
 
         if sender == self.identity.sender_id:
             return
@@ -334,9 +382,39 @@ class GameNode:
                 continue
         self.mesh.broadcast("HELLO", hello, port=self.profile.listen_port, reliable=False)
 
+    def _bootstrap_update(self) -> None:
+        # Lightweight, non-underhanded discovery: explicit HTTPS bootstrap + optional DNS SRV.
+        now = time.time()
+        if now - self.last_bootstrap_ts < 30.0:
+            return
+        self.last_bootstrap_ts = now
+
+        cache_path = Path(self.profile.data_dir or ".") / "bootstrap_cache.json"
+        cached = read_cached(cache_path, max_age_s=3600.0)
+        if cached:
+            self.profile.seed_peers = merge_seeds(self.profile.seed_peers, cached.seeds)
+
+        # DNS SRV seeds (optional, requires dnspython installed)
+        domain = os.environ.get("TWANSI_BOOTSTRAP_DOMAIN", "twansi.trentwyatt.com")
+        srv = dns_srv_seeds(domain)
+        if srv:
+            self.profile.seed_peers = merge_seeds(self.profile.seed_peers, srv)
+
+        # HTTPS bootstrap seeds
+        url = self.profile.bootstrap_url
+        if url:
+            try:
+                b = fetch_bootstrap(url, timeout_s=2.5)
+                self.profile.seed_peers = merge_seeds(self.profile.seed_peers, b.seeds)
+                write_cached(cache_path, b)
+                self.log_event(f"bootstrap: +{len(b.seeds)} seeds")
+            except Exception as e:  # noqa: BLE001
+                self.log_event(f"bootstrap failed: {e}")
+
     def _scan(self) -> None:
         peers = self.membership.healthy(max_age=240)
         if not peers:
+            self._bootstrap_update()
             self._announce()
             self.log_event("scan: no peers known, sent HELLO to seed/broadcast")
             return
@@ -373,7 +451,9 @@ class GameNode:
 
     def _action_trade(self, side: str, resource: str, qty: int) -> dict[str, Any]:
         try:
-            trade = self.store.trade_resource(self.identity.sender_id, resource, qty, side)
+            p = self.store.get_player(self.identity.sender_id) or {}
+            sector_id = int(p.get("sector", 1))
+            trade = self.store.station_trade(self.identity.sender_id, sector_id, resource, qty, side)
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         ev = {"player_id": self.identity.sender_id, "nick": self.profile.nick, **trade}
@@ -414,10 +494,34 @@ class GameNode:
             qty = int(args.get("qty", 10))
             return self._action_trade("sell", resource, qty)
         if action == "upgrade":
-            domain = str(args.get("domain", "ship_hull")).lower()
+            domain = str(args.get("domain", "")).lower()
+            if not domain:
+                levels = self.store.get_tech_levels(self.identity.sender_id)
+                tree = self._tech_tree_view(levels)
+                ready = [d for d in TECH_DOMAINS if tree[d]["upgrade_ready"]]
+                if not ready:
+                    return {"ok": False, "error": "no upgrade currently available"}
+                domain = sorted(ready, key=lambda d: (levels.get(d, 0), d))[0]
             if domain not in TECH_DOMAINS:
                 return {"ok": False, "error": f"invalid domain {domain}"}
             return self._action_upgrade(domain)
+        if action == "jump":
+            p = self.store.get_player(self.identity.sender_id) or {}
+            cur = int(p.get("sector", 1))
+            target = int(args.get("sector", 0) or 0)
+            if target <= 0:
+                target = random.randint(1, 96)
+            if target == cur:
+                target = 1 + (target % 96)
+            gas_cost = 10 + abs(target - cur) // 6
+            if int(p.get("gas", 0)) < gas_cost:
+                return {"ok": False, "error": "insufficient gas to jump"}
+            self.store.update_player_resources(self.identity.sender_id, 0, 0, -gas_cost, 0)
+            self.store.set_player_sector(self.identity.sender_id, target)
+            self.store.set_player_motion(self.identity.sender_id, 0.0, 0.0, 0.0, 0.0)
+            ev = {"player_id": self.identity.sender_id, "nick": self.profile.nick, "from": cur, "to": target, "gas_cost": gas_cost}
+            self._emit_event("jump", ev)
+            return {"ok": True, "result": ev}
         if action == "observe":
             return {"ok": True, "result": self.public_state()}
         return {"ok": False, "error": f"unknown action '{action}'"}
@@ -495,10 +599,9 @@ class GameNode:
                 elif cmd == "n":
                     self.do_action("sell", {"resource": "ore", "qty": 8})
                 elif cmd == "u":
-                    # rotate lowest tier domain for quick keyboard progression
-                    levels = self.store.get_tech_levels(self.identity.sender_id)
-                    dom = sorted(TECH_DOMAINS, key=lambda x: levels.get(x, 0))[0]
-                    self.do_action("upgrade", {"domain": dom})
+                    self.do_action("upgrade")
+                elif cmd == "j":
+                    self.do_action("jump")
                 elif cmd == "zoom_in":
                     self.radar_zoom = max(0.25, self.radar_zoom * 0.8)
                 elif cmd == "zoom_out":
@@ -506,6 +609,7 @@ class GameNode:
 
             now_sec = int(now)
             if now_sec % 8 == 0 and now_sec != self.last_announce_second:
+                self._bootstrap_update()
                 self._announce()
                 self.last_announce_second = now_sec
             if now_sec % 11 == 0 and now_sec != self.last_snapshot_second:
