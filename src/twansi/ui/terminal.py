@@ -27,10 +27,13 @@ class Dashboard:
         curses.wrapper(self._loop)
 
     def _draw_box(self, win: curses.window, title: str, color_pair: int) -> None:
-        win.box()
-        win.attron(curses.color_pair(color_pair))
-        win.addnstr(0, 2, f" {title} ", win.getmaxyx()[1] - 4)
-        win.attroff(curses.color_pair(color_pair))
+        try:
+            win.box()
+            win.attron(curses.color_pair(color_pair))
+            win.addnstr(0, 2, f" {title} ", max(0, win.getmaxyx()[1] - 4))
+            win.attroff(curses.color_pair(color_pair))
+        except curses.error:
+            pass
 
     def _draw_lines(self, win: curses.window, lines: list[str], color_pair: int = 0) -> None:
         h, w = win.getmaxyx()
@@ -44,6 +47,76 @@ class Dashboard:
                 pass
             if color_pair:
                 win.attroff(curses.color_pair(color_pair))
+
+    @staticmethod
+    def _format_seconds(value: float) -> str:
+        value = max(0.0, value)
+        if value >= 60.0:
+            mins = int(value // 60)
+            secs = int(value % 60)
+            return f"{mins}m{secs:02d}s"
+        return f"{value:4.1f}s"
+
+    @staticmethod
+    def _draw_progress_bar(
+        win: curses.window, row: int, label: str, percent: float, suffix: str, color_pair: int
+    ) -> None:
+        h, w = win.getmaxyx()
+        if row >= h - 1:
+            return
+        percent = max(0.0, min(1.0, percent))
+        label_field = label[:12].ljust(12)
+        suffix_text = suffix or ""
+        inside_width = max(8, w - 2)
+        bar_width = max(4, inside_width - len(label_field) - len(suffix_text) - 4)
+        fill = int(round(percent * bar_width))
+        fill = min(bar_width, max(0, fill))
+        empty = bar_width - fill
+        bar = "[" + "#" * fill + "." * empty + "]"
+        line = f"{label_field} {bar} {suffix_text}"
+        win.attron(curses.color_pair(color_pair))
+        try:
+            win.addnstr(row, 1, line, w - 2)
+        except curses.error:
+            pass
+        win.attroff(curses.color_pair(color_pair))
+
+    def _draw_progress_bars(self, win: curses.window, bars: list[tuple[str, float, str, int]]) -> None:
+        h, _ = win.getmaxyx()
+        start_row = max(1, h - len(bars) - 1)
+        for idx, (label, percent, suffix, color) in enumerate(bars):
+            self._draw_progress_bar(win, start_row + idx, label, percent, suffix, color)
+
+    def _build_progress_bars(self, metrics: dict[str, Any], player: dict[str, Any]) -> list[tuple[str, float, str, int]]:
+        bars: list[tuple[str, float, str, int]] = []
+        ap = int(player.get("ap", 0) or 0)
+        ap_max = int(metrics.get("ap_max", 200) or 200)
+        ap_next = float(metrics.get("ap_next_in", 0.0) or 0.0)
+        if ap_max > 0:
+            ap_pct = min(1.0, max(0.0, ap / ap_max))
+        else:
+            ap_pct = 1.0
+        if ap >= ap_max:
+            ap_suffix = f"{ap}/{ap_max} full"
+        else:
+            ap_suffix = f"{ap}/{ap_max} ({self._format_seconds(ap_next)} to next)"
+        bars.append(("AP", ap_pct, ap_suffix, Palette.GOOD))
+        timers = metrics.get("timers", {})
+        timer_specs = [
+            ("Resource", "resource", Palette.RADAR),
+            ("Strategic", "strategic", Palette.WARN),
+            ("Movement", "movement", Palette.EVENT),
+        ]
+        for label, key, color in timer_specs:
+            timer = timers.get(key)
+            if not timer:
+                continue
+            remaining = float(timer.get("remaining", 0.0) or 0.0)
+            period = float(timer.get("period", 1.0) or 1.0)
+            progress = 1.0 - min(1.0, max(0.0, remaining / period)) if period > 0 else 1.0
+            suffix = f"{self._format_seconds(remaining)}"
+            bars.append((label, progress, suffix, color))
+        return bars
 
     def _loop(self, stdscr: curses.window) -> None:
         stdscr.nodelay(True)
@@ -178,6 +251,7 @@ class Dashboard:
                 float(player.get("pos_y", 0.0)),
                 state.get("contacts", []),
                 float(state.get("metrics", {}).get("radar_zoom", 1.0)),
+                timestamp=state.get("timestamp"),
             )
             self._draw_lines(w_radar, radar_lines, Palette.RADAR)
 
