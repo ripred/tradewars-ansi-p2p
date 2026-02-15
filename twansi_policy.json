@@ -7,6 +7,7 @@
     "battle",
     "market_trade",
     "chat",
+    "mission_complete",
     "tech_upgrade",
     "jump",
     "defense_upgrade",

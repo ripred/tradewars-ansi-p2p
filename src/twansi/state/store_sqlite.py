@@ -138,6 +138,12 @@ class Store:
                 level INTEGER NOT NULL,
                 PRIMARY KEY(player_id, domain)
             );
+            CREATE TABLE IF NOT EXISTS mission_claims (
+                player_id TEXT NOT NULL,
+                mission_id TEXT NOT NULL,
+                claimed_ts REAL NOT NULL,
+                PRIMARY KEY(player_id, mission_id)
+            );
             """
         )
         self._migrate_players_table()
@@ -146,6 +152,51 @@ class Store:
         self._init_stations()
         self._init_ports()
         self.db.commit()
+
+    def has_mission_claim(self, player_id: str, mission_id: str) -> bool:
+        row = self.db.execute(
+            "SELECT 1 FROM mission_claims WHERE player_id=? AND mission_id=?",
+            (str(player_id), str(mission_id)),
+        ).fetchone()
+        return bool(row)
+
+    def set_mission_claim(self, player_id: str, mission_id: str) -> None:
+        self.db.execute(
+            "INSERT OR IGNORE INTO mission_claims(player_id, mission_id, claimed_ts) VALUES(?,?,?)",
+            (str(player_id), str(mission_id), time.time()),
+        )
+        self.db.commit()
+
+    def leaderboard(self, limit: int = 10) -> list[dict[str, Any]]:
+        limit = max(1, min(50, int(limit)))
+        # Compute owned sectors count in SQL.
+        rows = self.db.execute(
+            """
+            SELECT p.player_id, p.nick, p.credits,
+                   COALESCE(s.owned, 0) as sectors_owned
+            FROM players p
+            LEFT JOIN (
+              SELECT owner_player_id as pid, COUNT(*) as owned
+              FROM sectors
+              WHERE owner_player_id IS NOT NULL
+              GROUP BY owner_player_id
+            ) s ON s.pid = p.player_id
+            ORDER BY p.credits DESC, sectors_owned DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            out.append(
+                {
+                    "player_id": str(r[0]),
+                    "nick": str(r[1]),
+                    "credits": int(r[2]),
+                    "sectors_owned": int(r[3]),
+                }
+            )
+        return out
 
     def _migrate_players_table(self) -> None:
         cols = {row[1] for row in self.db.execute("PRAGMA table_info(players)").fetchall()}

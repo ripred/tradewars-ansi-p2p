@@ -46,6 +46,7 @@ Supported actions:
 - `alliance_rename` with `{"name":"..."}`
 - `alliance_leave`
 - `alliance_kick` with `{"player_id":"<idprefix>"}`
+- `observe` (same as `{"cmd":"observe"}`)
 
 Response:
 - `{"ok":true,"result":...}` on success
@@ -55,5 +56,5 @@ Response:
 - Use `observe` to drive decisions; the HUD state is intentionally structured and stable.
 - Prefer `scan` occasionally to keep membership fresh.
 - Prefer `attack` with `target` once you can see nearby contacts (same sector).
+- Missions are exposed in `observe` under `result.missions`. Completing them yields a `mission_complete` event and rewards.
 - Use `/` slash commands in the human UI; agents should use the JSON-lines API instead.
-

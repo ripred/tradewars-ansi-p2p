@@ -175,8 +175,8 @@ class Dashboard:
                     else:
                         key = None
                 if key:
-                    if key in ("1", "2", "3", "4", "5", "6"):
-                        self.mode = {"1": "hud", "2": "map", "3": "players", "4": "trade", "5": "alliance", "6": "chat"}[key]
+                    if key in ("1", "2", "3", "4", "5", "6", "7"):
+                        self.mode = {"1": "hud", "2": "map", "3": "players", "4": "trade", "5": "alliance", "6": "chat", "7": "scores"}[key]
                     elif key == "/":
                         self.input_active = True
                         self.input_kind = "cmd"
@@ -257,6 +257,17 @@ class Dashboard:
                     "",
                     "Warps: " + ",".join(str(x) for x in (state.get("nav", {}).get("warps", []) or [])[:24]),
                 ]
+                ms = state.get("missions") or []
+                if ms:
+                    lines.append("")
+                    lines.append("Missions (5m):")
+                    for m in ms[:3]:
+                        kind = str(m.get("kind", "?"))
+                        tgt = int(m.get("target_sector", 0) or 0)
+                        exp = int(m.get("expires_in_s", 0) or 0)
+                        claimed = bool(m.get("claimed", False))
+                        reward = int(m.get("reward_credits", 0) or 0)
+                        lines.append(f" - {kind} @ {tgt}  +{reward}c  in:{exp:3d}s  {'DONE' if claimed else ''}")
                 port = state.get("port")
                 if port:
                     lines.append("")
@@ -306,6 +317,14 @@ class Dashboard:
                 for msg in (state.get("chat_recent") or [])[: (ph - 4)]:
                     lines.append(msg)
                 self._draw_lines(w_player, lines, Palette.GOOD)
+            elif self.mode == "scores":
+                self._draw_box(w_player, "SCORES", Palette.TITLE)
+                lines = ["Leaderboard (credits, sectors owned):", ""]
+                for i, row in enumerate((state.get("leaderboard") or [])[: (ph - 4)], start=1):
+                    lines.append(
+                        f"{str(i).rjust(2)} {str(row.get('nick','?'))[:12].ljust(12)} {str(row.get('player_id',''))[:8]}  c:{int(row.get('credits',0)):6d}  s:{int(row.get('sectors_owned',0)):2d}"
+                    )
+                self._draw_lines(w_player, lines, Palette.GOOD)
 
             self._draw_box(w_metrics, "DASHBOARD", Palette.TITLE)
             metrics = state.get("metrics", {})
@@ -354,7 +373,7 @@ class Dashboard:
                 mlines.extend(
                     [
                         "",
-                        "Keys: 1 HUD 2 MAP 3 PLAYERS 4 TRADE 5 ALLIANCE 6 CHAT | t say | l local say | / command",
+                        "Keys: 1 HUD 2 MAP 3 PLAYERS 4 TRADE 5 ALLIANCE 6 CHAT 7 SCORES | t say | l local say | / command",
                         "Ops: q quit | m mine | a attack | s scan | i invite | d digest | b/n ore | f/r gas | c/v crystal | u upgrade | j jump | g defense | +/- zoom | h help",
                     ]
                 )

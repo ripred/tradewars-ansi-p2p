@@ -17,6 +17,7 @@ from twansi.config import Profile, load_profile, parse_listen, save_profile, twa
 from twansi.game.alliances import create_alliance, deterministic_alliance_id, join_alliance, player_alliance
 from twansi.game.mapgen import ensure_map
 from twansi.game.market import drift_market, market_snapshot
+from twansi.game.missions import current_missions
 from twansi.game.rules import (
     AP_MAX,
     AP_REGEN_PERIOD_SECONDS,
@@ -170,6 +171,12 @@ class GameNode:
                     ap_next_in = max(0.0, AP_REGEN_PERIOD_SECONDS - ((now - last) % AP_REGEN_PERIOD_SECONDS))
         except Exception:
             ap_next_in = 0.0
+        missions = [m.__dict__ for m in current_missions(self.profile.shard, self.policy.protocol_epoch, sectors=96, now_ts=now)]
+        # Attach claim state for this player for UI/agents.
+        if player:
+            for m in missions:
+                m["claimed"] = self.store.has_mission_claim(self.identity.sender_id, str(m["mission_id"]))
+
         alliance_block = None
         aid = str(player.get("alliance_id") or "")
         if aid:
@@ -197,6 +204,8 @@ class GameNode:
             "port": self.store.port_info(int(player.get("sector", 1))) if player else None,
             "sector": sector_block,
             "nav": {"warps": self.store.list_warps(int(player.get("sector", 1))) if player else []},
+            "missions": missions,
+            "leaderboard": self.store.leaderboard(10),
             "tech": {
                 "levels": tech_levels,
                 "tree": self._tech_tree_view(tech_levels),
@@ -361,6 +370,12 @@ class GameNode:
             winner = str(payload.get("winner", ""))
             if winner == atk:
                 self.store.claim_sector(int(payload.get("sector_id", 1)), winner)
+            # Mission: raid (win a battle in target sector)
+            if winner and winner == atk:
+                try:
+                    self._maybe_claim_missions(trigger="raid", sector_id=int(payload.get("sector_id", 1)))
+                except Exception:
+                    pass
         elif et == "alliance_join":
             aid = str(payload.get("alliance_id", ""))
             if aid and pid:
@@ -389,6 +404,19 @@ class GameNode:
         elif et == "chat":
             # Stored in event_log already; nothing else to apply.
             pass
+        elif et == "mission_complete":
+            mid = str(payload.get("mission_id", ""))
+            kind = str(payload.get("kind", ""))
+            credits = int(payload.get("credits", 0))
+            ore = int(payload.get("ore", 0))
+            gas = int(payload.get("gas", 0))
+            crystal = int(payload.get("crystal", 0))
+            if pid and mid:
+                self.store.ensure_player(pid, payload.get("nick", pid[:8]))
+                if not self.store.has_mission_claim(pid, mid):
+                    self.store.set_mission_claim(pid, mid)
+                    self.store.update_player_resources(pid, credits, ore, gas, crystal)
+                    self.log_event(f"mission_complete/{kind}: +{credits}c for {pid[:8]}")
         elif et == "market_trade" and pid:
             self.store.ensure_player(pid, payload.get("nick", pid[:8]))
             resource = str(payload.get("resource", "ore"))
@@ -691,6 +719,12 @@ class GameNode:
             return {"ok": False, "error": str(e)}
         ev = {"player_id": self.identity.sender_id, "nick": self.profile.nick, **trade}
         self._emit_event("market_trade", ev)
+        # Mission: supply (sell in target sector)
+        try:
+            if side == "sell":
+                self._maybe_claim_missions(trigger="supply", sector_id=int(trade.get("sector_id", 0) or 0))
+        except Exception:
+            pass
         return {"ok": True, "result": ev}
 
     def _action_upgrade(self, domain: str) -> dict[str, Any]:
@@ -777,6 +811,8 @@ class GameNode:
             self.log_event(
                 f"scan/sec {sector_id} warps={warps[:10]} port={'yes' if port else 'no'} owner={(s.get('owner_player_id') or '-')[:8]} defL={s.get('defense_level',0)}"
             )
+            # Mission: survey (scan in target sector)
+            self._maybe_claim_missions(trigger="survey", sector_id=sector_id)
             return {"ok": True, "result": "scan"}
         if action == "invite":
             try:
@@ -858,6 +894,35 @@ class GameNode:
         if action == "observe":
             return {"ok": True, "result": self.public_state()}
         return {"ok": False, "error": f"unknown action '{action}'"}
+
+    def _maybe_claim_missions(self, trigger: str, sector_id: int) -> None:
+        trigger = str(trigger)
+        sector_id = int(sector_id)
+        ms = current_missions(self.profile.shard, self.policy.protocol_epoch, sectors=96, now_ts=time.time())
+        for m in ms:
+            if m.kind != trigger:
+                continue
+            if int(m.target_sector) != sector_id:
+                continue
+            if self.store.has_mission_claim(self.identity.sender_id, m.mission_id):
+                continue
+            payload = {
+                "mission_id": m.mission_id,
+                "kind": m.kind,
+                "target_sector": m.target_sector,
+                "player_id": self.identity.sender_id,
+                "nick": self.profile.nick,
+                "credits": m.reward_credits,
+                "ore": m.reward_ore,
+                "gas": m.reward_gas,
+                "crystal": m.reward_crystal,
+                "sector_id": sector_id,
+            }
+            # Apply locally and emit.
+            self.store.set_mission_claim(self.identity.sender_id, m.mission_id)
+            self.store.update_player_resources(self.identity.sender_id, m.reward_credits, m.reward_ore, m.reward_gas, m.reward_crystal)
+            self._emit_event("mission_complete", payload)
+            self.log_event(f"mission complete: {m.kind} -> +{m.reward_credits}c")
 
     async def _agent_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         while not self.runtime.shutdown:

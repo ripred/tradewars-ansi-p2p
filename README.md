@@ -92,6 +92,12 @@ TWANSI_HOME=$PWD/.data TWANSI_DISABLE_UI=1 twansi run
 - `j` jump to another sector (cheaper if it’s a direct warp; AP+gas cost)
 - `g` upgrade sector defenses (only if you own the sector; AP+resources)
 
+Missions:
+- Shown on the map screen (`2`). They rotate every ~5 minutes (deterministic per shard/epoch).
+- `survey`: scan (`s`) in the mission sector
+- `raid`: win a battle in the mission sector
+- `supply`: sell cargo in the mission sector
+
 Slash commands:
 - `/say <text>` global chat
 - `/local <text>` sector-local chat

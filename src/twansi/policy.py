@@ -29,6 +29,7 @@ def _default_policy_dict() -> dict[str, Any]:
             "battle",
             "market_trade",
             "chat",
+            "mission_complete",
             "tech_upgrade",
             "jump",
             "defense_upgrade",
