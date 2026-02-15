@@ -92,6 +92,8 @@ class GameNode:
         self.agent_server_port = int(os.environ.get("TWANSI_AGENT_PORT", str(profile.listen_port + 100)))
         self.radar_zoom = 1.0
         self.server: asyncio.AbstractServer | None = None
+        self._peer_meta_cache: dict[str, tuple[int, str]] = {}
+        self._peer_meta_cache_ts = 0.0
 
     def log_event(self, text: str) -> None:
         if self.print_logs:
@@ -241,14 +243,50 @@ class GameNode:
     def enqueue_command(self, cmd: str) -> None:
         self.command_queue.put(cmd)
 
-    def _fanout_events(self, events: list[dict[str, Any]], exclude_peer_ids: set[str] | None = None, reliable: bool = True) -> None:
-        peers = [p for p in self.membership.healthy(max_age=240) if (exclude_peer_ids is None or p.peer_id not in exclude_peer_ids)]
+    def _fanout_events(
+        self,
+        events: list[dict[str, Any]],
+        exclude_peer_ids: set[str] | None = None,
+        reliable: bool = True,
+        peers_override: list[Any] | None = None,  # list[Peer] from Membership
+    ) -> None:
+        peers = peers_override if peers_override is not None else self.membership.healthy(max_age=240)
+        peers = [p for p in peers if (exclude_peer_ids is None or p.peer_id not in exclude_peer_ids)]
         if not peers:
             self.mesh.broadcast("EVENT_BATCH", {"events": events}, port=self.profile.listen_port, reliable=reliable)
             return
         fanout = min(len(peers), max(3, int(math.sqrt(len(peers))) + 1))
         for p in random.sample(peers, fanout):
             self.mesh.send("EVENT_BATCH", {"events": events}, (p.host, p.port), reliable=reliable)
+
+    def _scoped_peers(self, scope: str, sector_id: int = 0, alliance_id: str = "") -> list[Any]:
+        scope = str(scope or "global").lower()
+        peers = self.membership.healthy(max_age=240)
+        if scope == "global":
+            return peers
+        now = time.time()
+        if now - self._peer_meta_cache_ts > 2.0:
+            # Refresh with one SQL query instead of per-peer lookups.
+            ids = [p.peer_id for p in peers]
+            if ids:
+                q = ",".join("?" for _ in ids)
+                rows = self.store.db.execute(f"SELECT player_id, sector, COALESCE(alliance_id,'') FROM players WHERE player_id IN ({q})", ids).fetchall()
+                self._peer_meta_cache = {str(r[0]): (int(r[1]), str(r[2] or "")) for r in rows}
+            else:
+                self._peer_meta_cache = {}
+            self._peer_meta_cache_ts = now
+        out = []
+        for p in peers:
+            if scope == "sector":
+                meta = self._peer_meta_cache.get(p.peer_id, (0, ""))
+                if sector_id and int(meta[0]) != int(sector_id):
+                    continue
+            elif scope == "alliance":
+                meta = self._peer_meta_cache.get(p.peer_id, (0, ""))
+                if not alliance_id or str(meta[1]) != str(alliance_id):
+                    continue
+            out.append(p)
+        return out
 
     def _emit_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.local_event_counter += 1
@@ -258,7 +296,16 @@ class GameNode:
         ce["hops"] = 0
         # Avoid reliable spam for high-frequency/low-stakes updates.
         reliable = event_type in set(self.policy.reliable_event_types)
-        self._fanout_events([ce], reliable=reliable)
+        scope = "global"
+        sector_id = int(payload.get("sector_id", 0) or 0)
+        alliance_id = str(payload.get("alliance_id", "") or "")
+        if event_type == "movement":
+            scope = "sector"
+        if event_type == "chat":
+            ch = str(payload.get("channel", "global"))
+            scope = {"global": "global", "sector": "sector", "alliance": "alliance"}.get(ch, "global")
+        peers = self._scoped_peers(scope, sector_id=sector_id, alliance_id=alliance_id)
+        self._fanout_events([ce], reliable=reliable, peers_override=peers)
         self.log_event(f"{event_type}: {payload}")
         return ce
 
@@ -394,7 +441,16 @@ class GameNode:
             fwd = dict(ev)
             fwd["hops"] = hops + 1
             reliable = str(fwd.get("event_type", "")) in set(self.policy.reliable_event_types)
-            self._fanout_events([fwd], exclude_peer_ids={sender}, reliable=reliable)
+            scope = "global"
+            sector_id = int(payload.get("sector_id", 0) or 0)
+            alliance_id = str(payload.get("alliance_id", "") or "")
+            if et == "movement":
+                scope = "sector"
+            if et == "chat":
+                ch = str(payload.get("channel", "global"))
+                scope = {"global": "global", "sector": "sector", "alliance": "alliance"}.get(ch, "global")
+            peers = self._scoped_peers(scope, sector_id=sector_id, alliance_id=alliance_id)
+            self._fanout_events([fwd], exclude_peer_ids={sender}, reliable=reliable, peers_override=peers)
 
     def on_net_message(self, msg: dict[str, Any], addr: tuple[str, int]) -> None:
         mtype = str(msg.get("type", ""))
