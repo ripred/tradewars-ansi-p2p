@@ -43,14 +43,14 @@ TWANSI_HOME=$PWD/.data TWANSI_DISABLE_UI=1 twansi run
 When a node is running, a local TCP JSON-lines API is exposed on `127.0.0.1:<listen_port+100>`.
 
 Requests:
-- `{\"cmd\":\"observe\"}`
-- `{\"cmd\":\"act\",\"action\":\"mine|attack|scan|invite|digest|observe\"}`
-- `{\"cmd\":\"digest\"}`
-- `{\"cmd\":\"ack\"}`
+- `{"cmd":"observe"}`
+- `{"cmd":"act","action":"mine|attack|scan|invite|digest|observe"}`
+- `{"cmd":"digest"}`
+- `{"cmd":"ack"}`
 
 Responses:
-- `{\"ok\":true,\"result\":...}`
-- `{\"ok\":false,\"error\":\"...\"}`
+- `{"ok":true,"result":...}`
+- `{"ok":false,"error":"..."}`
 
 Run included bot harness:
 ```bash
