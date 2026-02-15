@@ -32,7 +32,7 @@ class Profile:
             pol = load_policy()
             self.shard_key = derive_shard_key(self.shard, pol.protocol_epoch)
         if not self.bootstrap_url:
-            self.bootstrap_url = os.environ.get(\"TWANSI_BOOTSTRAP_URL\", \"https://twansi.trentwyatt.com/bootstrap.json\")
+            self.bootstrap_url = os.environ.get("TWANSI_BOOTSTRAP_URL", "https://twansi.trentwyatt.com/bootstrap.json")
 
 
 def twansi_home() -> Path:

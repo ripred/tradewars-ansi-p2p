@@ -31,6 +31,7 @@ class Store:
                 gas INTEGER NOT NULL,
                 crystal INTEGER NOT NULL,
                 hp INTEGER NOT NULL,
+                shield INTEGER NOT NULL DEFAULT 0,
                 sector INTEGER NOT NULL,
                 pos_x REAL NOT NULL DEFAULT 0,
                 pos_y REAL NOT NULL DEFAULT 0,
@@ -45,7 +46,8 @@ class Store:
                 sector_id INTEGER PRIMARY KEY,
                 owner_player_id TEXT,
                 richness INTEGER NOT NULL,
-                danger INTEGER NOT NULL
+                danger INTEGER NOT NULL,
+                defense_level INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS alliances (
                 alliance_id TEXT PRIMARY KEY,
@@ -107,6 +109,7 @@ class Store:
             """
         )
         self._migrate_players_table()
+        self._migrate_sectors_table()
         self._init_market()
         self._init_stations()
         self.db.commit()
@@ -120,10 +123,16 @@ class Store:
             "vel_y": "ALTER TABLE players ADD COLUMN vel_y REAL NOT NULL DEFAULT 0",
             "ap": "ALTER TABLE players ADD COLUMN ap INTEGER NOT NULL DEFAULT 100",
             "ap_updated_ts": "ALTER TABLE players ADD COLUMN ap_updated_ts REAL NOT NULL DEFAULT 0",
+            "shield": "ALTER TABLE players ADD COLUMN shield INTEGER NOT NULL DEFAULT 0",
         }
         for col, stmt in required.items():
             if col not in cols:
                 self.db.execute(stmt)
+
+    def _migrate_sectors_table(self) -> None:
+        cols = {row[1] for row in self.db.execute("PRAGMA table_info(sectors)").fetchall()}
+        if "defense_level" not in cols:
+            self.db.execute("ALTER TABLE sectors ADD COLUMN defense_level INTEGER NOT NULL DEFAULT 0")
 
     def ensure_player(self, player_id: str, nick: str, doctrine: str = "assault") -> None:
         now = time.time()
@@ -472,8 +481,8 @@ class Store:
 
     def ensure_sector(self, sector_id: int, richness: int, danger: int) -> None:
         self.db.execute(
-            "INSERT OR IGNORE INTO sectors(sector_id,owner_player_id,richness,danger) VALUES(?,?,?,?)",
-            (sector_id, None, richness, danger),
+            "INSERT OR IGNORE INTO sectors(sector_id,owner_player_id,richness,danger,defense_level) VALUES(?,?,?,?,?)",
+            (sector_id, None, richness, danger, 0),
         )
         self.db.commit()
 
@@ -482,8 +491,38 @@ class Store:
         return dict(row) if row else None
 
     def claim_sector(self, sector_id: int, owner_player_id: str) -> None:
-        self.db.execute("UPDATE sectors SET owner_player_id=? WHERE sector_id=?", (owner_player_id, sector_id))
+        # On conquest, reset defenses.
+        self.db.execute(
+            "UPDATE sectors SET owner_player_id=?, defense_level=0 WHERE sector_id=?",
+            (owner_player_id, sector_id),
+        )
         self.db.commit()
+
+    def upgrade_sector_defense(self, sector_id: int, player_id: str, delta: int = 1) -> int:
+        sector_id = int(sector_id)
+        delta = max(1, int(delta))
+        s = self.get_sector(sector_id)
+        if not s:
+            raise ValueError("sector not found")
+        if str(s.get("owner_player_id") or "") != str(player_id):
+            raise ValueError("must own sector to upgrade defenses")
+
+        cur = int(s.get("defense_level", 0))
+        nxt = min(25, cur + delta)
+        # Cost scales with level.
+        credits = 120 + nxt * 30
+        ore = 10 + nxt * 3
+        crystal = 6 + nxt * 2
+        p = self.get_player(player_id)
+        if not p:
+            raise ValueError("player not found")
+        if int(p["credits"]) < credits or int(p["ore"]) < ore or int(p["crystal"]) < crystal:
+            raise ValueError("insufficient resources to upgrade defenses")
+
+        self.update_player_resources(player_id, -credits, -ore, 0, -crystal)
+        self.db.execute("UPDATE sectors SET defense_level=? WHERE sector_id=?", (nxt, sector_id))
+        self.db.commit()
+        return nxt
 
     def record_battle(self, attacker: str, defender: str, winner: str, damage_a: int, damage_d: int, sector_id: int, summary: str) -> None:
         self.db.execute(

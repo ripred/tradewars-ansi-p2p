@@ -24,6 +24,9 @@ def ship_stats(player: dict[str, Any], tech_levels: dict[str, int]) -> dict[str,
 
     return {
         "max_hp": max_hp,
+        "shield_max": int(round((40 + int(tech_levels.get(\"shields\", 0)) * 20) * fx[\"shield_bonus\"])),
+        "weapon_power": round(1.0 + 0.07 * int(tech_levels.get(\"weapons\", 0)), 3),
+        "defense_power": round(1.0 + 0.06 * int(tech_levels.get(\"defense_grid\", 0)) + 0.03 * int(tech_levels.get(\"shields\", 0)), 3),
         "cargo_capacity": cargo_capacity,
         "cargo_used": cargo_used,
         "cargo_overload": overload,

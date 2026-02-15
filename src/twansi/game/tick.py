@@ -5,10 +5,11 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from twansi.game.combat import resolve_battle
+from twansi.game.combat2 import resolve_battle_v2
 from twansi.game.economy import mine_burst, production_for_sector
 from twansi.game.rules import MAX_HP
 from twansi.game.tech import tech_effects
+from twansi.game.ship import ship_stats
 from twansi.state.store_sqlite import Store
 
 
@@ -82,23 +83,25 @@ class GameEngine:
             return None
         targets = [p for p in players if p["player_id"] != player_id]
         defender = random.choice(targets)
+        sector_id = int(attacker["sector"])
+        sector = self.store.get_sector(sector_id)
         atk_lv = self.store.get_tech_levels(attacker["player_id"])
         def_lv = self.store.get_tech_levels(defender["player_id"])
-        atk_fx = tech_effects(atk_lv)
-        def_fx = tech_effects(def_lv)
-        attacker = dict(attacker)
-        defender = dict(defender)
-        attacker["ore"] = int(attacker["ore"] * atk_fx["combat_bonus"])
-        attacker["gas"] = int(attacker["gas"] * atk_fx["combat_bonus"])
-        attacker["hp"] = int(attacker["hp"] * atk_fx["hull_bonus"])
-        defender["crystal"] = int(defender["crystal"] * def_fx["shield_bonus"])
-        defender["ore"] = int(defender["ore"] * def_fx["defense_bonus"])
-        defender["hp"] = int(defender["hp"] * def_fx["hull_bonus"])
-        sector_id = int(attacker["sector"])
-        result = resolve_battle(attacker, defender, sector_id)
+        atk_ship = ship_stats(attacker, atk_lv)
+        def_ship = ship_stats(defender, def_lv)
+        result = resolve_battle_v2(attacker, defender, sector, atk_ship, def_ship)
 
         self.store.update_player_resources(attacker["player_id"], 0, 0, 0, 0, hp=result["attacker_hp"])
         self.store.update_player_resources(defender["player_id"], 0, 0, 0, 0, hp=result["defender_hp"])
+        self.store.db.execute(
+            "UPDATE players SET shield=? WHERE player_id=?",
+            (int(result["attacker_shield_after"]), attacker["player_id"]),
+        )
+        self.store.db.execute(
+            "UPDATE players SET shield=? WHERE player_id=?",
+            (int(result["defender_shield_after"]), defender["player_id"]),
+        )
+        self.store.db.commit()
 
         if result["winner"] == attacker["player_id"]:
             self.store.claim_sector(sector_id, attacker["player_id"])
@@ -181,6 +184,27 @@ class GameEngine:
         heal = self.heal_tick(player_id)
         if heal:
             events.append(heal)
+        # Shield regen: slow baseline, faster if you have crystal.
+        p = self.store.get_player(player_id)
+        if p:
+            levels = self.store.get_tech_levels(player_id)
+            stats = ship_stats(p, levels)
+            shield_max = int(stats.get("shield_max", 0))
+            shield = int(p.get("shield", 0))
+            if shield < shield_max:
+                use_crystal = int(p.get("crystal", 0)) > 0 and (shield_max - shield) > 6
+                inc = 4 if use_crystal else 1
+                if use_crystal:
+                    self.store.update_player_resources(player_id, 0, 0, 0, -1)
+                new_shield = min(shield_max, shield + inc)
+                self.store.db.execute("UPDATE players SET shield=? WHERE player_id=?", (new_shield, player_id))
+                self.store.db.commit()
+                events.append(
+                    {
+                        "event_type": "shield_regen",
+                        "payload": {"player_id": player_id, "before": shield, "after": new_shield},
+                    }
+                )
         movement = self.movement_tick(player_id)
         if movement:
             events.append(movement)

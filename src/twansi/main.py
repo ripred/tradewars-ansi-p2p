@@ -263,6 +263,12 @@ class GameNode:
             to_sector = int(payload.get("to", 1))
             self.store.set_player_sector(pid, to_sector)
             self.store.set_player_motion(pid, 0.0, 0.0, 0.0, 0.0)
+        elif et == "defense_upgrade" and pid:
+            # Best-effort sync: accept claimed defense level.
+            sector_id = int(payload.get("sector_id", 1))
+            lvl = int(payload.get("defense_level", 0))
+            self.store.db.execute("UPDATE sectors SET defense_level=? WHERE sector_id=?", (lvl, sector_id))
+            self.store.db.commit()
 
         self.log_event(f"remote/{et}: {payload}")
 
@@ -560,6 +566,17 @@ class GameNode:
             ev = {"player_id": self.identity.sender_id, "nick": self.profile.nick, "from": cur, "to": target, "gas_cost": gas_cost, "ap_cost": ap_cost}
             self._emit_event("jump", ev)
             return {"ok": True, "result": ev}
+        if action == "defend":
+            p = self.store.get_player(self.identity.sender_id) or {}
+            sector_id = int(p.get("sector", 1))
+            try:
+                self.store.consume_ap(self.identity.sender_id, 2)
+                lvl = self.store.upgrade_sector_defense(sector_id, self.identity.sender_id, delta=1)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            ev = {"player_id": self.identity.sender_id, "nick": self.profile.nick, "sector_id": sector_id, "defense_level": lvl}
+            self._emit_event("defense_upgrade", ev)
+            return {"ok": True, "result": ev}
         if action == "observe":
             return {"ok": True, "result": self.public_state()}
         return {"ok": False, "error": f"unknown action '{action}'"}
@@ -640,6 +657,8 @@ class GameNode:
                     self.do_action("upgrade")
                 elif cmd == "j":
                     self.do_action("jump")
+                elif cmd == "g":
+                    self.do_action("defend")
                 elif cmd == "zoom_in":
                     self.radar_zoom = max(0.25, self.radar_zoom * 0.8)
                 elif cmd == "zoom_out":

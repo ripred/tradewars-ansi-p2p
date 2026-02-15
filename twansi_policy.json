@@ -8,6 +8,7 @@
     "market_trade",
     "tech_upgrade",
     "jump",
+    "defense_upgrade",
     "alliance_join"
   ],
   "rate_limits": {

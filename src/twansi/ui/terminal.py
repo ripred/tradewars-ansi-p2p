@@ -103,6 +103,7 @@ class Dashboard:
                     f"Station(sec {station.get('sector_id','?')}) O:{sp.get('ore',0)}/{st.get('ore',0)} "
                     f"G:{sp.get('gas',0)}/{st.get('gas',0)} C:{sp.get('crystal',0)}/{st.get('crystal',0)}"
                 )
+                owner = (state.get("station", {}) or {}).get("owner_player_id", None)
             nav = state.get("nav", {}).get("warps", [])
             if nav:
                 mlines.append("Warps: " + ",".join(str(x) for x in nav[:12]) + (" ..." if len(nav) > 12 else ""))
@@ -124,7 +125,7 @@ class Dashboard:
                     f"Spd:{ship.get('speed',1.0)}"
                 )
             if self.show_help:
-                mlines.extend(["", "Keys: q quit | m mine | a attack | s scan | i invite | d digest | b buy ore | n sell ore | u upgrade | j jump | +/- zoom | h help"])
+                mlines.extend(["", "Keys: q quit | m mine | a attack | s scan | i invite | d digest | b buy ore | n sell ore | u upgrade | j jump | g defense | +/- zoom | h help"])
             self._draw_lines(w_metrics, mlines, Palette.WARN)
 
             self._draw_box(w_radar, "RADAR", Palette.TITLE)
