@@ -47,6 +47,7 @@ class GameNode:
     def __init__(self, profile: Profile):
         self.profile = profile
         self.policy = load_policy()
+        self.print_logs = os.environ.get("TWANSI_LOG_STDOUT", "0") == "1"
         self.identity = Identity(profile.secret)
         shard_key = profile.shard_key or derive_shard_key(profile.shard, self.policy.protocol_epoch)
         self.shard_auth = ShardAuthenticator(shard_key)
@@ -84,6 +85,8 @@ class GameNode:
         self.server: asyncio.AbstractServer | None = None
 
     def log_event(self, text: str) -> None:
+        if self.print_logs:
+            print(text, flush=True)
         with self.panel_lock:
             self.event_panel.append(text)
             if len(self.event_panel) > 500:
@@ -99,6 +102,9 @@ class GameNode:
         player = self.store.get_player(self.identity.sender_id) or {}
         healthy = self.membership.healthy()
         self.netsplit.tick(len(healthy))
+        if player:
+            self.store.regen_ap(self.identity.sender_id)
+            player = self.store.get_player(self.identity.sender_id) or player
         tech_levels = self.store.get_tech_levels(self.identity.sender_id)
         contacts: list[dict[str, Any]] = []
         for p in healthy:
@@ -118,6 +124,7 @@ class GameNode:
             "contacts": contacts,
             "market": market_snapshot(self.store),
             "station": self.store.station_market(int(player.get("sector", 1))) if player else {},
+            "nav": {"warps": self.store.list_warps(int(player.get("sector", 1))) if player else []},
             "tech": {
                 "levels": tech_levels,
                 "tree": self._tech_tree_view(tech_levels),
@@ -172,7 +179,7 @@ class GameNode:
         ce = compact_event(event_type, payload, self.identity.sender_id, eid)
         ce["hops"] = 0
         # Avoid reliable spam for high-frequency/low-stakes updates.
-        reliable = event_type not in {"movement", "repair_tick"}
+        reliable = event_type in set(self.policy.reliable_event_types)
         self._fanout_events([ce], reliable=reliable)
         self.log_event(f"{event_type}: {payload}")
         return ce
@@ -261,10 +268,10 @@ class GameNode:
 
         hops = int(ev.get("hops", 0))
         sender = str(ev.get("sender", ""))
-        if hops < 2:
+        if hops < int(self.policy.max_event_hops):
             fwd = dict(ev)
             fwd["hops"] = hops + 1
-            reliable = str(fwd.get("event_type", "")) not in {"movement", "repair_tick"}
+            reliable = str(fwd.get("event_type", "")) in set(self.policy.reliable_event_types)
             self._fanout_events([fwd], exclude_peer_ids={sender}, reliable=reliable)
 
     def on_net_message(self, msg: dict[str, Any], addr: tuple[str, int]) -> None:
@@ -473,27 +480,51 @@ class GameNode:
         args = args or {}
         action = action.strip().lower()
         if action == "mine":
+            try:
+                self.store.consume_ap(self.identity.sender_id, 1)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
             return self._action_mine()
         if action == "attack":
+            try:
+                self.store.consume_ap(self.identity.sender_id, 3)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
             return self._action_attack()
         if action == "scan":
             self._scan()
             return {"ok": True, "result": "scan"}
         if action == "invite":
+            try:
+                self.store.consume_ap(self.identity.sender_id, 1)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
             return self._action_invite()
         if action == "digest":
             digest = build_offline_digest(self.store, self.identity.sender_id)
             self.log_event(f"digest: {digest}")
             return {"ok": True, "result": digest}
         if action == "buy":
+            try:
+                self.store.consume_ap(self.identity.sender_id, 1)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
             resource = str(args.get("resource", "ore")).lower()
             qty = int(args.get("qty", 10))
             return self._action_trade("buy", resource, qty)
         if action == "sell":
+            try:
+                self.store.consume_ap(self.identity.sender_id, 1)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
             resource = str(args.get("resource", "ore")).lower()
             qty = int(args.get("qty", 10))
             return self._action_trade("sell", resource, qty)
         if action == "upgrade":
+            try:
+                self.store.consume_ap(self.identity.sender_id, 2)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
             domain = str(args.get("domain", "")).lower()
             if not domain:
                 levels = self.store.get_tech_levels(self.identity.sender_id)
@@ -513,13 +544,20 @@ class GameNode:
                 target = random.randint(1, 96)
             if target == cur:
                 target = 1 + (target % 96)
-            gas_cost = 10 + abs(target - cur) // 6
+            warps = set(self.store.list_warps(cur))
+            is_short = target in warps
+            gas_cost = (3 if is_short else 10) + abs(target - cur) // (12 if is_short else 6)
+            ap_cost = 1 if is_short else 3
+            try:
+                self.store.consume_ap(self.identity.sender_id, ap_cost)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
             if int(p.get("gas", 0)) < gas_cost:
                 return {"ok": False, "error": "insufficient gas to jump"}
             self.store.update_player_resources(self.identity.sender_id, 0, 0, -gas_cost, 0)
             self.store.set_player_sector(self.identity.sender_id, target)
             self.store.set_player_motion(self.identity.sender_id, 0.0, 0.0, 0.0, 0.0)
-            ev = {"player_id": self.identity.sender_id, "nick": self.profile.nick, "from": cur, "to": target, "gas_cost": gas_cost}
+            ev = {"player_id": self.identity.sender_id, "nick": self.profile.nick, "from": cur, "to": target, "gas_cost": gas_cost, "ap_cost": ap_cost}
             self._emit_event("jump", ev)
             return {"ok": True, "result": ev}
         if action == "observe":

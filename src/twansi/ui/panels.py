@@ -8,6 +8,7 @@ def player_summary(player: dict[str, Any]) -> list[str]:
         f"{player.get('nick','?')}  [{player.get('player_id','')[:8]}]",
         f"Doctrine: {player.get('doctrine','assault')}",
         f"HP: {player.get('hp',0)}    Sector: {player.get('sector',0)}",
+        f"AP: {player.get('ap',0)}",
         f"Credits: {player.get('credits',0)}",
         f"Ore: {player.get('ore',0)}  Gas: {player.get('gas',0)}  Crystal: {player.get('crystal',0)}",
         f"Alliance: {player.get('alliance_id') or '-'}",

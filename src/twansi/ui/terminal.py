@@ -103,6 +103,9 @@ class Dashboard:
                     f"Station(sec {station.get('sector_id','?')}) O:{sp.get('ore',0)}/{st.get('ore',0)} "
                     f"G:{sp.get('gas',0)}/{st.get('gas',0)} C:{sp.get('crystal',0)}/{st.get('crystal',0)}"
                 )
+            nav = state.get("nav", {}).get("warps", [])
+            if nav:
+                mlines.append("Warps: " + ",".join(str(x) for x in nav[:12]) + (" ..." if len(nav) > 12 else ""))
             tech_levels = state.get("tech", {}).get("levels", {})
             if tech_levels:
                 mlines.append(

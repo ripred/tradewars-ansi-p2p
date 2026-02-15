@@ -36,6 +36,8 @@ class Store:
                 pos_y REAL NOT NULL DEFAULT 0,
                 vel_x REAL NOT NULL DEFAULT 0,
                 vel_y REAL NOT NULL DEFAULT 0,
+                ap INTEGER NOT NULL DEFAULT 100,
+                ap_updated_ts REAL NOT NULL DEFAULT 0,
                 alliance_id TEXT,
                 updated_ts REAL NOT NULL
             );
@@ -91,6 +93,11 @@ class Store:
                 stock INTEGER NOT NULL,
                 PRIMARY KEY(sector_id, resource)
             );
+            CREATE TABLE IF NOT EXISTS warps (
+                sector_id INTEGER NOT NULL,
+                to_sector_id INTEGER NOT NULL,
+                PRIMARY KEY(sector_id, to_sector_id)
+            );
             CREATE TABLE IF NOT EXISTS tech_tree (
                 player_id TEXT NOT NULL,
                 domain TEXT NOT NULL,
@@ -111,6 +118,8 @@ class Store:
             "pos_y": "ALTER TABLE players ADD COLUMN pos_y REAL NOT NULL DEFAULT 0",
             "vel_x": "ALTER TABLE players ADD COLUMN vel_x REAL NOT NULL DEFAULT 0",
             "vel_y": "ALTER TABLE players ADD COLUMN vel_y REAL NOT NULL DEFAULT 0",
+            "ap": "ALTER TABLE players ADD COLUMN ap INTEGER NOT NULL DEFAULT 100",
+            "ap_updated_ts": "ALTER TABLE players ADD COLUMN ap_updated_ts REAL NOT NULL DEFAULT 0",
         }
         for col, stmt in required.items():
             if col not in cols:
@@ -126,11 +135,61 @@ class Store:
             """,
             (player_id, nick, doctrine, 1000, 100, 100, 100, 100, 1, None, now),
         )
+        # Initialize AP timestamp if it's still default.
+        self.db.execute(
+            "UPDATE players SET ap_updated_ts=? WHERE player_id=? AND ap_updated_ts=0",
+            (now, player_id),
+        )
         for domain in ("ship_hull", "weapons", "shields", "mining", "defense_grid"):
             self.db.execute(
                 "INSERT OR IGNORE INTO tech_tree(player_id,domain,level) VALUES(?,?,?)",
                 (player_id, domain, 0),
             )
+        self.db.commit()
+
+    def regen_ap(self, player_id: str, max_ap: int = 200, per_minute: int = 20) -> int:
+        p = self.get_player(player_id)
+        if not p:
+            return 0
+        now = time.time()
+        last = float(p.get("ap_updated_ts", 0.0) or 0.0)
+        ap = int(p.get("ap", 0))
+        if last <= 0:
+            last = now
+        delta_min = max(0.0, (now - last) / 60.0)
+        gain = int(delta_min * per_minute)
+        if gain <= 0 and ap <= max_ap:
+            return ap
+        new_ap = min(max_ap, ap + gain)
+        self.db.execute(
+            "UPDATE players SET ap=?, ap_updated_ts=? WHERE player_id=?",
+            (new_ap, now, player_id),
+        )
+        self.db.commit()
+        return new_ap
+
+    def consume_ap(self, player_id: str, cost: int) -> None:
+        cost = max(0, int(cost))
+        if cost == 0:
+            return
+        p = self.get_player(player_id)
+        if not p:
+            raise ValueError("player not found")
+        ap = int(p.get("ap", 0))
+        if ap < cost:
+            raise ValueError("insufficient AP")
+        self.db.execute("UPDATE players SET ap=ap-?, updated_ts=? WHERE player_id=?", (cost, time.time(), player_id))
+        self.db.commit()
+
+    def list_warps(self, sector_id: int) -> list[int]:
+        rows = self.db.execute("SELECT to_sector_id FROM warps WHERE sector_id=? ORDER BY to_sector_id ASC", (int(sector_id),)).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def add_warp(self, sector_id: int, to_sector_id: int) -> None:
+        self.db.execute(
+            "INSERT OR IGNORE INTO warps(sector_id,to_sector_id) VALUES(?,?)",
+            (int(sector_id), int(to_sector_id)),
+        )
         self.db.commit()
 
     def _init_market(self) -> None:
