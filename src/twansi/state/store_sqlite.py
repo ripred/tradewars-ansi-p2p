@@ -649,6 +649,63 @@ class Store:
         rows = self.db.execute("SELECT * FROM players ORDER BY updated_ts DESC").fetchall()
         return [dict(r) for r in rows]
 
+    def alliance_info(self, alliance_id: str) -> dict[str, Any] | None:
+        row = self.db.execute("SELECT * FROM alliances WHERE alliance_id=?", (str(alliance_id),)).fetchone()
+        return dict(row) if row else None
+
+    def list_alliance_members(self, alliance_id: str) -> list[dict[str, Any]]:
+        alliance_id = str(alliance_id)
+        rows = self.db.execute(
+            """
+            SELECT m.player_id as player_id, m.role as role, p.nick as nick
+            FROM alliance_members m
+            LEFT JOIN players p ON p.player_id=m.player_id
+            WHERE m.alliance_id=?
+            ORDER BY CASE m.role WHEN 'leader' THEN 0 ELSE 1 END, COALESCE(p.nick, m.player_id) ASC
+            """,
+            (alliance_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            out.append({"player_id": str(r[0]), "role": str(r[1]), "nick": str(r[2] or str(r[0])[:8])})
+        return out
+
+    def create_alliance(self, alliance_id: str, name: str, owner_player_id: str) -> None:
+        alliance_id = str(alliance_id)
+        name = str(name or "alliance")
+        owner_player_id = str(owner_player_id)
+        self.db.execute(
+            "INSERT OR IGNORE INTO alliances(alliance_id,name,created_ts) VALUES(?,?,?)",
+            (alliance_id, name, time.time()),
+        )
+        self.db.execute(
+            "INSERT OR REPLACE INTO alliance_members(alliance_id,player_id,role) VALUES(?,?,?)",
+            (alliance_id, owner_player_id, "leader"),
+        )
+        self.db.execute("UPDATE players SET alliance_id=? WHERE player_id=?", (alliance_id, owner_player_id))
+        self.db.commit()
+
+    def rename_alliance(self, alliance_id: str, name: str) -> None:
+        self.db.execute("UPDATE alliances SET name=? WHERE alliance_id=?", (str(name or "alliance"), str(alliance_id)))
+        self.db.commit()
+
+    def remove_alliance_member(self, alliance_id: str, player_id: str) -> None:
+        self.db.execute(
+            "DELETE FROM alliance_members WHERE alliance_id=? AND player_id=?",
+            (str(alliance_id), str(player_id)),
+        )
+        self.db.execute("UPDATE players SET alliance_id=NULL WHERE player_id=? AND alliance_id=?", (str(player_id), str(alliance_id)))
+        self.db.commit()
+
+    def leave_alliance(self, player_id: str) -> None:
+        p = self.get_player(str(player_id))
+        if not p or not p.get("alliance_id"):
+            return
+        aid = str(p["alliance_id"])
+        self.db.execute("DELETE FROM alliance_members WHERE alliance_id=? AND player_id=?", (aid, str(player_id)))
+        self.db.execute("UPDATE players SET alliance_id=NULL WHERE player_id=?", (str(player_id),))
+        self.db.commit()
+
     def update_player_resources(self, player_id: str, credits: int, ore: int, gas: int, crystal: int, hp: int | None = None) -> None:
         now = time.time()
         if hp is None:

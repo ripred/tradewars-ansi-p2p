@@ -25,7 +25,19 @@ def _default_policy_dict() -> dict[str, Any]:
         "max_protocol_version": 1,
         "protocol_epoch": 1,
         "max_event_hops": 2,
-        "reliable_event_types": ["battle", "market_trade", "tech_upgrade", "jump", "alliance_join"],
+        "reliable_event_types": [
+            "battle",
+            "market_trade",
+            "chat",
+            "tech_upgrade",
+            "jump",
+            "defense_upgrade",
+            "alliance_join",
+            "alliance_create",
+            "alliance_rename",
+            "alliance_leave",
+            "alliance_kick",
+        ],
         "rate_limits": {"packets_per_sec": 120},
     }
 

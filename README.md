@@ -75,11 +75,13 @@ TWANSI_HOME=$PWD/.data TWANSI_DISABLE_UI=1 twansi run
 ```
 
 ## Controls (Dashboard)
+- `1` HUD, `2` map, `3` players, `4` trade, `5` alliance, `6` chat
+- `t` open global chat input, `l` open local (sector) chat input, `/` open command input
 - `q` quit
 - `h` toggle help text
 - `+` / `-` radar zoom in/out
 - `m` mine burst (AP cost)
-- `a` attack random target (AP cost)
+- `a` attack random target (AP cost) or `/attack <idprefix>` to target
 - `s` scan/ping peers
 - `i` invite a peer to your alliance (AP cost)
 - `d` offline digest summary
@@ -89,6 +91,14 @@ TWANSI_HOME=$PWD/.data TWANSI_DISABLE_UI=1 twansi run
 - `u` upgrade next available tech tier (AP cost)
 - `j` jump to another sector (cheaper if it’s a direct warp; AP+gas cost)
 - `g` upgrade sector defenses (only if you own the sector; AP+resources)
+
+Slash commands:
+- `/say <text>` global chat
+- `/local <text>` sector-local chat
+- `/attack <idprefix>` targeted combat (same sector)
+- `/jump <sector>`
+- `/buy <res> <qty>`, `/sell <res> <qty>`
+- `/all create <name>`, `/all rename <name>`, `/all leave`, `/all kick <idprefix>`
 
 The metrics panel already surfaces shared market prices plus station and port totals while the help overlay (`h`) reiterates these keys. `s` logs warp neighbors, current sector ownership/defense, and whether a port exists so you can spot trade targets before jumping. Trades triggered with `b/n`, `f/r`, or `c/v` are routed through the local port when one is present, otherwise they fall back to the per-sector station market highlighted on the dashboard.
 
@@ -111,11 +121,13 @@ When a node is running, a local TCP JSON-lines API is exposed on:
 Requests:
 - `{"cmd":"observe"}`
 - `{"cmd":"digest"}`
-- `{"cmd":"act","action":"mine|attack|scan|invite|buy|sell|upgrade|jump|defend|observe","args":{...}}`
+- `{"cmd":"act","action":"mine|attack|scan|invite|buy|sell|upgrade|jump|defend|chat|alliance_create|alliance_rename|alliance_leave|alliance_kick|observe","args":{...}}`
 
 Example actions:
 - Buy gas: `{"cmd":"act","action":"buy","args":{"resource":"gas","qty":5}}`
 - Sell ore: `{"cmd":"act","action":"sell","args":{"resource":"ore","qty":10}}`
+- Targeted attack: `{"cmd":"act","action":"attack","args":{"target":"deadbeef"}}`
+- Chat: `{"cmd":"act","action":"chat","args":{"channel":"global","text":"hi"}}`
 - Upgrade a specific domain: `{"cmd":"act","action":"upgrade","args":{"domain":"weapons"}}`
 - Jump to a sector: `{"cmd":"act","action":"jump","args":{"sector":7}}`
 - Upgrade defenses: `{"cmd":"act","action":"defend"}`

@@ -125,6 +125,56 @@ class GameEngine:
             },
         }
 
+    def battle_for_players(self, attacker_id: str, defender_id: str) -> dict[str, Any] | None:
+        attacker = self.store.get_player(str(attacker_id))
+        defender = self.store.get_player(str(defender_id))
+        if not attacker or not defender:
+            return None
+        if str(attacker.get("player_id")) == str(defender.get("player_id")):
+            return None
+        if int(attacker.get("sector", 0) or 0) != int(defender.get("sector", 0) or 0):
+            return None
+        sector_id = int(attacker.get("sector", 1))
+        sector = self.store.get_sector(sector_id)
+        atk_lv = self.store.get_tech_levels(str(attacker.get("player_id")))
+        def_lv = self.store.get_tech_levels(str(defender.get("player_id")))
+        atk_ship = ship_stats(attacker, atk_lv)
+        def_ship = ship_stats(defender, def_lv)
+        result = resolve_battle_v2(attacker, defender, sector, atk_ship, def_ship)
+
+        self.store.update_player_resources(str(attacker.get("player_id")), 0, 0, 0, 0, hp=result["attacker_hp"])
+        self.store.update_player_resources(str(defender.get("player_id")), 0, 0, 0, 0, hp=result["defender_hp"])
+        self.store.db.execute(
+            "UPDATE players SET shield=? WHERE player_id=?",
+            (int(result["attacker_shield_after"]), str(attacker.get("player_id"))),
+        )
+        self.store.db.execute(
+            "UPDATE players SET shield=? WHERE player_id=?",
+            (int(result["defender_shield_after"]), str(defender.get("player_id"))),
+        )
+        self.store.db.commit()
+
+        if result["winner"] == str(attacker.get("player_id")):
+            self.store.claim_sector(sector_id, str(attacker.get("player_id")))
+
+        self.store.record_battle(
+            result["attacker"],
+            result["defender"],
+            result["winner"],
+            result["damage_attacker"],
+            result["damage_defender"],
+            result["sector_id"],
+            result["summary"],
+        )
+        player_damage = result["damage_attacker"] if str(attacker.get("player_id")) == str(attacker_id) else result["damage_defender"]
+        return {
+            "event_type": "battle",
+            "payload": {
+                **result,
+                "damage_taken_by_player": player_damage,
+            },
+        }
+
     def heal_tick(self, player_id: str) -> dict[str, Any] | None:
         p = self.store.get_player(player_id)
         if not p:

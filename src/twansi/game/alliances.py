@@ -8,13 +8,7 @@ from twansi.state.store_sqlite import Store
 
 def create_alliance(store: Store, name: str, owner_player_id: str) -> str:
     alliance_id = uuid.uuid4().hex[:12]
-    store.db.execute("INSERT INTO alliances(alliance_id,name,created_ts) VALUES(?,?,?)", (alliance_id, name, time.time()))
-    store.db.execute(
-        "INSERT OR REPLACE INTO alliance_members(alliance_id,player_id,role) VALUES(?,?,?)",
-        (alliance_id, owner_player_id, "leader"),
-    )
-    store.db.execute("UPDATE players SET alliance_id=? WHERE player_id=?", (alliance_id, owner_player_id))
-    store.db.commit()
+    store.create_alliance(alliance_id, name, owner_player_id)
     return alliance_id
 
 
@@ -32,3 +26,10 @@ def player_alliance(store: Store, player_id: str) -> str | None:
     if not row:
         return None
     return row[0]
+
+
+def deterministic_alliance_id(owner_player_id: str, name: str, shard: str, epoch: int) -> str:
+    import hashlib
+
+    material = f"twansi-alliance|{shard}|{int(epoch)}|{owner_player_id}|{name}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:12]

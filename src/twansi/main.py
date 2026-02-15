@@ -14,7 +14,7 @@ from queue import Empty, Queue
 from typing import Any
 
 from twansi.config import Profile, load_profile, parse_listen, save_profile, twansi_home
-from twansi.game.alliances import create_alliance, join_alliance, player_alliance
+from twansi.game.alliances import create_alliance, deterministic_alliance_id, join_alliance, player_alliance
 from twansi.game.mapgen import ensure_map
 from twansi.game.market import drift_market, market_snapshot
 from twansi.game.rules import (
@@ -124,27 +124,27 @@ class GameNode:
                 continue
             if my_sector and int(rp.get("sector", 0) or 0) != my_sector:
                 continue
-                motion_ts = float(rp.get("motion_ts", 0.0) or 0.0)
-                x0 = float(rp.get("pos_x", 0.0))
-                y0 = float(rp.get("pos_y", 0.0))
-                vx = float(rp.get("vel_x", 0.0))
-                vy = float(rp.get("vel_y", 0.0))
-                dt = max(0.0, min(10.0, now - motion_ts)) if motion_ts > 0 else 0.0
-                contacts.append(
-                    {
-                        "id": p.peer_id,
-                        "nick": rp.get("nick", p.nick),
-                        "sector": int(rp.get("sector", 0) or 0),
-                        "pos_x": x0,
-                        "pos_y": y0,
-                        "vel_x": vx,
-                        "vel_y": vy,
-                        "motion_ts": motion_ts,
-                        # Convenience fields (especially for agent clients):
-                        "x": x0 + vx * dt,
-                        "y": y0 + vy * dt,
-                    }
-                )
+            motion_ts = float(rp.get("motion_ts", 0.0) or 0.0)
+            x0 = float(rp.get("pos_x", 0.0))
+            y0 = float(rp.get("pos_y", 0.0))
+            vx = float(rp.get("vel_x", 0.0))
+            vy = float(rp.get("vel_y", 0.0))
+            dt = max(0.0, min(10.0, now - motion_ts)) if motion_ts > 0 else 0.0
+            contacts.append(
+                {
+                    "id": p.peer_id,
+                    "nick": rp.get("nick", p.nick),
+                    "sector": int(rp.get("sector", 0) or 0),
+                    "pos_x": x0,
+                    "pos_y": y0,
+                    "vel_x": vx,
+                    "vel_y": vy,
+                    "motion_ts": motion_ts,
+                    # Convenience fields (especially for agent clients):
+                    "x": x0 + vx * dt,
+                    "y": y0 + vy * dt,
+                }
+            )
         timers = {
             "resource": {
                 "remaining": max(0.0, RESOURCE_TICK_SECONDS - (now - self.last_resource_tick)),
@@ -168,18 +168,40 @@ class GameNode:
                     ap_next_in = max(0.0, AP_REGEN_PERIOD_SECONDS - ((now - last) % AP_REGEN_PERIOD_SECONDS))
         except Exception:
             ap_next_in = 0.0
+        alliance_block = None
+        aid = str(player.get("alliance_id") or "")
+        if aid:
+            info = self.store.alliance_info(aid) or {"alliance_id": aid, "name": aid}
+            alliance_block = {"alliance_id": aid, "name": info.get("name", aid), "members": self.store.list_alliance_members(aid)}
+        # Recent chat lines for the chat screen (bounded).
+        chat_lines: list[str] = []
+        for ev in self.store.recent_events(limit=120):
+            if str(ev.get("event_type", "")) != "chat":
+                continue
+            p = dict(ev.get("payload", {}) or {})
+            ch = str(p.get("channel", "global"))
+            nick = str(p.get("nick", p.get("player_id", "")[:8]))
+            txt = str(p.get("text", ""))[:220]
+            stamp = time.strftime("%H:%M:%S", time.localtime(float(ev.get("ts", now))))
+            chat_lines.append(f"[{stamp}] {ch[:1].upper()} {nick}: {txt}")
+        chat_lines = chat_lines[-60:]
+        sector_block = self.store.get_sector(int(player.get("sector", 1))) if player else {}
+
         return {
             "player": player,
             "contacts": contacts,
             "market": market_snapshot(self.store),
             "station": self.store.station_market(int(player.get("sector", 1))) if player else {},
             "port": self.store.port_info(int(player.get("sector", 1))) if player else None,
+            "sector": sector_block,
             "nav": {"warps": self.store.list_warps(int(player.get("sector", 1))) if player else []},
             "tech": {
                 "levels": tech_levels,
                 "tree": self._tech_tree_view(tech_levels),
             },
             "ship": ship_stats(player, tech_levels) if player else {},
+            "alliance": alliance_block,
+            "chat_recent": chat_lines,
             "metrics": {
                 "peer_count": len(healthy),
                 "events_seen": self.runtime.events_seen,
@@ -296,6 +318,30 @@ class GameNode:
             aid = str(payload.get("alliance_id", ""))
             if aid and pid:
                 join_alliance(self.store, aid, pid)
+        elif et == "alliance_create":
+            aid = str(payload.get("alliance_id", ""))
+            name = str(payload.get("name", "alliance"))
+            leader = str(payload.get("leader", ""))
+            if aid and leader:
+                self.store.create_alliance(aid, name, leader)
+        elif et == "alliance_rename":
+            aid = str(payload.get("alliance_id", ""))
+            name = str(payload.get("name", "alliance"))
+            if aid:
+                self.store.rename_alliance(aid, name)
+        elif et == "alliance_leave":
+            aid = str(payload.get("alliance_id", ""))
+            leaver = str(payload.get("player_id", ""))
+            if aid and leaver:
+                self.store.remove_alliance_member(aid, leaver)
+        elif et == "alliance_kick":
+            aid = str(payload.get("alliance_id", ""))
+            kicked = str(payload.get("player_id", ""))
+            if aid and kicked:
+                self.store.remove_alliance_member(aid, kicked)
+        elif et == "chat":
+            # Stored in event_log already; nothing else to apply.
+            pass
         elif et == "market_trade" and pid:
             self.store.ensure_player(pid, payload.get("nick", pid[:8]))
             resource = str(payload.get("resource", "ore"))
@@ -520,6 +566,45 @@ class GameNode:
         self._emit_event(ev["event_type"], ev["payload"])
         return {"ok": True, "result": ev}
 
+    def _action_attack_target(self, target_prefix: str) -> dict[str, Any]:
+        target_prefix = str(target_prefix or "").strip().lower()
+        if not target_prefix:
+            return {"ok": False, "error": "missing target"}
+        # Find any player id that matches prefix.
+        players = self.store.list_players()
+        target_id = ""
+        for p in players:
+            pid = str(p.get("player_id", ""))
+            if pid and pid.lower().startswith(target_prefix):
+                target_id = pid
+                break
+        if not target_id:
+            return {"ok": False, "error": "no such target"}
+        ev = self.engine.battle_for_players(self.identity.sender_id, target_id)
+        if not ev:
+            return {"ok": False, "error": "target not available (must be in same sector)"}
+        self._emit_event(ev["event_type"], ev["payload"])
+        return {"ok": True, "result": ev}
+
+    def _action_chat(self, text: str, channel: str = "global") -> dict[str, Any]:
+        text = str(text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty chat"}
+        channel = str(channel or "global").lower()
+        if channel not in ("global", "sector", "alliance"):
+            return {"ok": False, "error": "invalid channel"}
+        p = self.store.get_player(self.identity.sender_id) or {}
+        payload = {
+            "player_id": self.identity.sender_id,
+            "nick": self.profile.nick,
+            "channel": channel,
+            "text": text[:240],
+            "sector_id": int(p.get("sector", 1)),
+            "alliance_id": str(p.get("alliance_id") or ""),
+        }
+        self._emit_event("chat", payload)
+        return {"ok": True, "result": payload}
+
     def _action_invite(self) -> dict[str, Any]:
         peers = self.membership.healthy(max_age=240)
         if not peers:
@@ -527,7 +612,10 @@ class GameNode:
         target = random.choice(peers)
         alliance = player_alliance(self.store, self.identity.sender_id)
         if not alliance:
-            alliance = create_alliance(self.store, f"{self.profile.nick}-alliance", self.identity.sender_id)
+            name = f"{self.profile.nick}-alliance"
+            alliance = deterministic_alliance_id(self.identity.sender_id, name, self.profile.shard, self.policy.protocol_epoch)
+            self.store.create_alliance(alliance, name, self.identity.sender_id)
+            self._emit_event("alliance_create", {"alliance_id": alliance, "name": name, "leader": self.identity.sender_id})
         self.mesh.send("ALLIANCE_INVITE", {"target": target.peer_id, "alliance_id": alliance}, (target.host, target.port), reliable=True)
         self.log_event(f"alliance invite sent to {target.nick}")
         return {"ok": True, "result": {"target": target.peer_id, "alliance_id": alliance}}
@@ -572,7 +660,57 @@ class GameNode:
                 self.store.consume_ap(self.identity.sender_id, 3)
             except ValueError as e:
                 return {"ok": False, "error": str(e)}
+            target = str(args.get("target", "") or "")
+            if target:
+                return self._action_attack_target(target)
             return self._action_attack()
+        if action == "chat":
+            return self._action_chat(str(args.get("text", "")), str(args.get("channel", "global")))
+        if action == "alliance_create":
+            name = str(args.get("name", "") or "").strip() or f"{self.profile.nick}-alliance"
+            aid = deterministic_alliance_id(self.identity.sender_id, name, self.profile.shard, self.policy.protocol_epoch)
+            self.store.create_alliance(aid, name, self.identity.sender_id)
+            self._emit_event("alliance_create", {"alliance_id": aid, "name": name, "leader": self.identity.sender_id})
+            return {"ok": True, "result": {"alliance_id": aid, "name": name}}
+        if action == "alliance_rename":
+            p = self.store.get_player(self.identity.sender_id) or {}
+            aid = str(p.get("alliance_id") or "")
+            if not aid:
+                return {"ok": False, "error": "not in an alliance"}
+            name = str(args.get("name", "") or "").strip()
+            if not name:
+                return {"ok": False, "error": "missing name"}
+            self.store.rename_alliance(aid, name)
+            self._emit_event("alliance_rename", {"alliance_id": aid, "name": name})
+            return {"ok": True, "result": {"alliance_id": aid, "name": name}}
+        if action == "alliance_leave":
+            p = self.store.get_player(self.identity.sender_id) or {}
+            aid = str(p.get("alliance_id") or "")
+            if not aid:
+                return {"ok": True, "result": "no alliance"}
+            self.store.leave_alliance(self.identity.sender_id)
+            self._emit_event("alliance_leave", {"alliance_id": aid, "player_id": self.identity.sender_id})
+            return {"ok": True, "result": {"alliance_id": aid}}
+        if action == "alliance_kick":
+            p = self.store.get_player(self.identity.sender_id) or {}
+            aid = str(p.get("alliance_id") or "")
+            if not aid:
+                return {"ok": False, "error": "not in an alliance"}
+            target = str(args.get("player_id", "") or "").strip().lower()
+            if not target:
+                return {"ok": False, "error": "missing target"}
+            members = self.store.list_alliance_members(aid)
+            target_id = ""
+            for m in members:
+                pid = str(m.get("player_id", ""))
+                if pid.lower().startswith(target):
+                    target_id = pid
+                    break
+            if not target_id:
+                return {"ok": False, "error": "target not in alliance"}
+            self.store.remove_alliance_member(aid, target_id)
+            self._emit_event("alliance_kick", {"alliance_id": aid, "player_id": target_id})
+            return {"ok": True, "result": {"player_id": target_id}}
         if action == "scan":
             self._scan()
             p = self.store.get_player(self.identity.sender_id) or {}
@@ -729,6 +867,9 @@ class GameNode:
                     cmd = self.command_queue.get_nowait()
                 except Empty:
                     break
+                if cmd.startswith("/"):
+                    self._handle_slash_command(cmd)
+                    continue
                 if cmd == "quit":
                     self.runtime.shutdown = True
                     break
@@ -776,6 +917,68 @@ class GameNode:
 
             elapsed = time.perf_counter() - t0
             await asyncio.sleep(max(0.05, 0.2 - elapsed))
+
+    def _handle_slash_command(self, cmd: str) -> None:
+        # Simple command language for human play + agent integration.
+        raw = cmd.strip()
+        if not raw.startswith("/"):
+            return
+        parts = raw[1:].strip().split()
+        if not parts:
+            return
+        op = parts[0].lower()
+        args = parts[1:]
+
+        if op in ("say", "g"):
+            self.do_action("chat", {"channel": "global", "text": " ".join(args)})
+            return
+        if op in ("local", "l"):
+            self.do_action("chat", {"channel": "sector", "text": " ".join(args)})
+            return
+        if op in ("ally", "a2"):
+            self.do_action("chat", {"channel": "alliance", "text": " ".join(args)})
+            return
+        if op in ("attack", "atk", "a"):
+            if args:
+                self.do_action("attack", {"target": args[0]})
+            else:
+                self.do_action("attack")
+            return
+        if op in ("jump", "j"):
+            sector = int(args[0]) if args else 0
+            self.do_action("jump", {"sector": sector})
+            return
+        if op in ("buy", "b"):
+            if not args:
+                return
+            res = args[0]
+            qty = int(args[1]) if len(args) > 1 else 10
+            self.do_action("buy", {"resource": res, "qty": qty})
+            return
+        if op in ("sell", "s"):
+            if not args:
+                return
+            res = args[0]
+            qty = int(args[1]) if len(args) > 1 else 10
+            self.do_action("sell", {"resource": res, "qty": qty})
+            return
+        if op in ("all", "alliance"):
+            if not args:
+                return
+            sub = args[0].lower()
+            rest = args[1:]
+            if sub == "create":
+                self.do_action("alliance_create", {"name": " ".join(rest)})
+            elif sub == "rename":
+                self.do_action("alliance_rename", {"name": " ".join(rest)})
+            elif sub == "leave":
+                self.do_action("alliance_leave", {})
+            elif sub == "kick" and rest:
+                self.do_action("alliance_kick", {"player_id": rest[0]})
+            return
+
+        # Unknown command: show in log so the player isn't confused.
+        self.log_event(f"unknown command: {raw}")
 
     async def run_async(self) -> None:
         await self.transport.start()

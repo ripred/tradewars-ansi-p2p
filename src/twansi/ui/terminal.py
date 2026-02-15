@@ -18,6 +18,10 @@ class Dashboard:
         self.command_cb = command_cb
         self.events: deque[str] = deque(maxlen=200)
         self.show_help = True
+        self.mode = "hud"
+        self.input_active = False
+        self.input_kind = ""
+        self.input_buf = ""
 
     def push_event(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -146,6 +150,45 @@ class Dashboard:
         while True:
             key = read_key(stdscr)
             if key:
+                if self.input_active:
+                    if key == "enter":
+                        line = self.input_buf.strip()
+                        if line:
+                            if self.input_kind == "say":
+                                self.command_cb(f"/say {line}")
+                            elif self.input_kind == "local":
+                                self.command_cb(f"/local {line}")
+                            elif self.input_kind == "cmd":
+                                # User types without leading slash.
+                                self.command_cb("/" + line.lstrip("/"))
+                        self.input_active = False
+                        self.input_kind = ""
+                        self.input_buf = ""
+                        key = None
+                    elif key == "backspace":
+                        self.input_buf = self.input_buf[:-1]
+                        key = None
+                    elif len(key) == 1 and 32 <= ord(key) < 127:
+                        if len(self.input_buf) < 180:
+                            self.input_buf += key
+                        key = None
+                    else:
+                        key = None
+                if key:
+                    if key in ("1", "2", "3", "4", "5", "6"):
+                        self.mode = {"1": "hud", "2": "map", "3": "players", "4": "trade", "5": "alliance", "6": "chat"}[key]
+                    elif key == "/":
+                        self.input_active = True
+                        self.input_kind = "cmd"
+                        self.input_buf = ""
+                    elif key == "t":
+                        self.input_active = True
+                        self.input_kind = "say"
+                        self.input_buf = ""
+                    elif key == "l":
+                        self.input_active = True
+                        self.input_kind = "local"
+                        self.input_buf = ""
                 if key == "q":
                     self.command_cb("quit")
                     return
@@ -199,8 +242,70 @@ class Dashboard:
             w_radar = stdscr.derwin(rh, rw, ry, rx)
             w_events = stdscr.derwin(eh, ew, ey, ex)
 
-            self._draw_box(w_player, "CAPTAIN", Palette.TITLE)
-            self._draw_lines(w_player, player_summary(state.get("player", {})), Palette.GOOD)
+            if self.mode == "hud":
+                self._draw_box(w_player, "CAPTAIN", Palette.TITLE)
+                self._draw_lines(w_player, player_summary(state.get("player", {})), Palette.GOOD)
+            elif self.mode == "map":
+                self._draw_box(w_player, "SECTOR", Palette.TITLE)
+                p = state.get("player", {})
+                sector_id = int(p.get("sector", 0) or 0)
+                sector = (state.get("sector") or {}) if isinstance(state.get("sector"), dict) else {}
+                lines = [
+                    f"Sector: {sector_id}",
+                    f"Owner: {(sector.get('owner_player_id') or '-')[:8]}  Def: {sector.get('defense_level',0)}",
+                    f"Rich: {sector.get('richness','?')}  Danger: {sector.get('danger','?')}",
+                    "",
+                    "Warps: " + ",".join(str(x) for x in (state.get("nav", {}).get("warps", []) or [])[:24]),
+                ]
+                port = state.get("port")
+                if port:
+                    lines.append("")
+                    lines.append(f"Port: {port.get('port_class','?')} stock O:{port.get('stock',{}).get('ore',0)} G:{port.get('stock',{}).get('gas',0)} C:{port.get('stock',{}).get('crystal',0)}")
+                self._draw_lines(w_player, lines, Palette.GOOD)
+            elif self.mode == "players":
+                self._draw_box(w_player, "CONTACTS", Palette.TITLE)
+                lines = ["(same sector) /attack <idprefix> or use Players screen", ""]
+                for c in (state.get("contacts") or [])[: (ph - 4)]:
+                    lines.append(f"{str(c.get('nick','?'))[:12].ljust(12)} {str(c.get('id',''))[:8]} x:{float(c.get('x',0.0)):6.1f} y:{float(c.get('y',0.0)):6.1f}")
+                self._draw_lines(w_player, lines, Palette.GOOD)
+            elif self.mode == "trade":
+                self._draw_box(w_player, "TRADE", Palette.TITLE)
+                lines = [
+                    "Hotkeys: b/n ore  f/r gas  c/v crystal",
+                    "Or commands: /buy ore 10  /sell gas 5",
+                    "",
+                ]
+                st = state.get("station") or {}
+                if st:
+                    sp = st.get("prices", {})
+                    stock = st.get("stock", {})
+                    lines.append(f"Station O:{sp.get('ore',0)}/{stock.get('ore',0)} G:{sp.get('gas',0)}/{stock.get('gas',0)} C:{sp.get('crystal',0)}/{stock.get('crystal',0)}")
+                port = state.get("port")
+                if port:
+                    pr = port.get("prices", {})
+                    lines.append(f"Port {port.get('port_class','?')} O:{pr.get('ore',{}).get('bid',0)}/{pr.get('ore',{}).get('ask',0)} G:{pr.get('gas',{}).get('bid',0)}/{pr.get('gas',{}).get('ask',0)} C:{pr.get('crystal',{}).get('bid',0)}/{pr.get('crystal',{}).get('ask',0)}")
+                self._draw_lines(w_player, lines, Palette.GOOD)
+            elif self.mode == "alliance":
+                self._draw_box(w_player, "ALLIANCE", Palette.TITLE)
+                a = state.get("alliance") or {}
+                lines = []
+                if not a:
+                    lines.append("No alliance.")
+                    lines.append("Commands: /all create <name>")
+                else:
+                    lines.append(f"{a.get('name','alliance')} [{str(a.get('alliance_id',''))[:12]}]")
+                    lines.append("Members:")
+                    for m in (a.get('members') or [])[: (ph - 5)]:
+                        lines.append(f"{str(m.get('nick','?'))[:12].ljust(12)} {str(m.get('player_id',''))[:8]} {m.get('role','')}")
+                    lines.append("")
+                    lines.append("Cmds: /all rename <name> | /all leave | /all kick <idprefix>")
+                self._draw_lines(w_player, lines, Palette.GOOD)
+            elif self.mode == "chat":
+                self._draw_box(w_player, "CHAT", Palette.TITLE)
+                lines = ["t=global say | l=local(sector) say | /=command", ""]
+                for msg in (state.get("chat_recent") or [])[: (ph - 4)]:
+                    lines.append(msg)
+                self._draw_lines(w_player, lines, Palette.GOOD)
 
             self._draw_box(w_metrics, "DASHBOARD", Palette.TITLE)
             metrics = state.get("metrics", {})
@@ -249,7 +354,8 @@ class Dashboard:
                 mlines.extend(
                     [
                         "",
-                        "Keys: q quit | m mine | a attack | s scan | i invite | d digest | b/n ore buy/sell | f/r gas buy/sell | c/v crystal buy/sell | u upgrade | j jump | g defense | +/- zoom | h help",
+                        "Keys: 1 HUD 2 MAP 3 PLAYERS 4 TRADE 5 ALLIANCE 6 CHAT | t say | l local say | / command",
+                        "Ops: q quit | m mine | a attack | s scan | i invite | d digest | b/n ore | f/r gas | c/v crystal | u upgrade | j jump | g defense | +/- zoom | h help",
                     ]
                 )
             bars = self._build_progress_bars(metrics, state.get("player", {}))
@@ -275,5 +381,16 @@ class Dashboard:
 
             self._draw_box(w_events, "EVENTS", Palette.TITLE)
             self._draw_lines(w_events, list(self.events)[: max(1, eh - 2)], Palette.EVENT)
+
+            if self.input_active and ew > 10 and eh > 3:
+                prompt = {"say": "say> ", "local": "local> ", "cmd": "/"}[self.input_kind]
+                line = (prompt + self.input_buf)[-(ew - 4) :]
+                try:
+                    w_events.attron(curses.A_BOLD)
+                    w_events.addnstr(eh - 2, 2, line.ljust(max(0, ew - 4)), max(0, ew - 4))
+                except curses.error:
+                    pass
+                finally:
+                    w_events.attroff(curses.A_BOLD)
 
             stdscr.refresh()
