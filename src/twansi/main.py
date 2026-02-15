@@ -124,23 +124,27 @@ class GameNode:
                 continue
             if my_sector and int(rp.get("sector", 0) or 0) != my_sector:
                 continue
-            motion_ts = float(rp.get("motion_ts", 0.0) or 0.0)
-            x0 = float(rp.get("pos_x", 0.0))
-            y0 = float(rp.get("pos_y", 0.0))
-            vx = float(rp.get("vel_x", 0.0))
-            vy = float(rp.get("vel_y", 0.0))
-            contacts.append(
-                {
-                    "id": p.peer_id,
-                    "nick": rp.get("nick", p.nick),
-                    "sector": int(rp.get("sector", 0) or 0),
-                    "pos_x": x0,
-                    "pos_y": y0,
-                    "vel_x": vx,
-                    "vel_y": vy,
-                    "motion_ts": motion_ts,
-                }
-            )
+                motion_ts = float(rp.get("motion_ts", 0.0) or 0.0)
+                x0 = float(rp.get("pos_x", 0.0))
+                y0 = float(rp.get("pos_y", 0.0))
+                vx = float(rp.get("vel_x", 0.0))
+                vy = float(rp.get("vel_y", 0.0))
+                dt = max(0.0, min(10.0, now - motion_ts)) if motion_ts > 0 else 0.0
+                contacts.append(
+                    {
+                        "id": p.peer_id,
+                        "nick": rp.get("nick", p.nick),
+                        "sector": int(rp.get("sector", 0) or 0),
+                        "pos_x": x0,
+                        "pos_y": y0,
+                        "vel_x": vx,
+                        "vel_y": vy,
+                        "motion_ts": motion_ts,
+                        # Convenience fields (especially for agent clients):
+                        "x": x0 + vx * dt,
+                        "y": y0 + vy * dt,
+                    }
+                )
         timers = {
             "resource": {
                 "remaining": max(0.0, RESOURCE_TICK_SECONDS - (now - self.last_resource_tick)),
@@ -708,8 +712,9 @@ class GameNode:
                 self.last_movement_tick = now
                 if mv:
                     mv["payload"]["nick"] = self.profile.nick
-                    # Movement is high frequency: do not use reliable delivery.
-                    self._emit_event(mv["event_type"], mv["payload"])
+                    # Movement is high frequency: if nobody is listening, don't spam the mesh.
+                    if self.membership.healthy(max_age=240):
+                        self._emit_event(mv["event_type"], mv["payload"])
 
             if now - self.last_resource_tick >= RESOURCE_TICK_SECONDS:
                 ev = self.engine.resource_tick_for_player(self.identity.sender_id)

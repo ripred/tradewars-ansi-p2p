@@ -62,24 +62,42 @@ class Dashboard:
         win: curses.window, row: int, label: str, percent: float, suffix: str, color_pair: int
     ) -> None:
         h, w = win.getmaxyx()
-        if row >= h - 1:
+        if row >= h - 1 or w < 10:
             return
         percent = max(0.0, min(1.0, percent))
         label_field = label[:12].ljust(12)
+        prefix = f"{label_field} "
         suffix_text = suffix or ""
-        inside_width = max(8, w - 2)
-        bar_width = max(4, inside_width - len(label_field) - len(suffix_text) - 4)
-        fill = int(round(percent * bar_width))
-        fill = min(bar_width, max(0, fill))
-        empty = bar_width - fill
+        available = max(4, w - len(prefix) - len(suffix_text) - 6)
+        fill = int(round(percent * available))
+        fill = min(available, max(0, fill))
+        empty = available - fill
         bar = "[" + "#" * fill + "." * empty + "]"
-        line = f"{label_field} {bar} {suffix_text}"
-        win.attron(curses.color_pair(color_pair))
+
         try:
-            win.addnstr(row, 1, line, w - 2)
+            win.addnstr(row, 1, prefix, max(0, min(len(prefix), w - 2)))
         except curses.error:
             pass
-        win.attroff(curses.color_pair(color_pair))
+
+        bar_col = 1 + len(prefix)
+        try:
+            win.attron(curses.color_pair(color_pair) | curses.A_BOLD)
+            win.addnstr(row, bar_col, bar, max(0, min(len(bar), w - 2 - len(prefix))))
+        except curses.error:
+            pass
+        finally:
+            win.attroff(curses.color_pair(color_pair) | curses.A_BOLD)
+
+        if suffix_text:
+            suffix_col = bar_col + len(bar) + 1
+            if suffix_col < w - 1:
+                try:
+                    win.attron(curses.A_DIM)
+                    win.addnstr(row, suffix_col, suffix_text, max(0, w - suffix_col - 1))
+                except curses.error:
+                    pass
+                finally:
+                    win.attroff(curses.A_DIM)
 
     def _draw_progress_bars(self, win: curses.window, bars: list[tuple[str, float, str, int]]) -> None:
         h, _ = win.getmaxyx()
