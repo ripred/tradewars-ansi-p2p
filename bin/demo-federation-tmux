@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SESSION="${1:-twansi-demo}"
+
+D1="$ROOT/.demo1"
+D2="$ROOT/.demo2"
+rm -rf "$D1" "$D2"
+mkdir -p "$D1" "$D2"
+
+PYTHONPATH="$ROOT/src" TWANSI_HOME="$D1" python3 -m twansi.main init --nick demo-alpha --listen 127.0.0.1:39410 --shard alpha --seed 127.0.0.1:39411 >/dev/null
+PYTHONPATH="$ROOT/src" TWANSI_HOME="$D2" python3 -m twansi.main init --nick demo-beta  --listen 127.0.0.1:39411 --shard alpha --seed 127.0.0.1:39410 >/dev/null
+
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+tmux new-session -d -s "$SESSION" -n node1 "cd '$ROOT' && PYTHONPATH='$ROOT/src' TWANSI_HOME='$D1' python3 -m twansi.main run"
+tmux split-window -h -t "$SESSION":node1 "cd '$ROOT' && PYTHONPATH='$ROOT/src' TWANSI_HOME='$D2' python3 -m twansi.main run"
+tmux select-layout -t "$SESSION":node1 tiled
+
+echo "tmux session started: $SESSION"
+echo "attach: tmux attach -t $SESSION"

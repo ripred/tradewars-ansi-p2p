@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NODES="${1:-10}"
+DURATION="${2:-90}"
+BASE_PORT="${3:-39500}"
+
+if [ "$NODES" -lt 3 ]; then
+  echo "NODES must be >= 3" >&2
+  exit 1
+fi
+
+PIDS=()
+HOMES=()
+
+cleanup(){
+  for p in "${PIDS[@]:-}"; do
+    kill "$p" 2>/dev/null || true
+  done
+  for p in "${PIDS[@]:-}"; do
+    wait "$p" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+
+for i in $(seq 1 "$NODES"); do
+  home="$ROOT/.scale-$i"
+  HOMES+=("$home")
+  rm -rf "$home"
+  mkdir -p "$home"
+
+  p=$((BASE_PORT + i - 1))
+  seed="127.0.0.1:$BASE_PORT"
+  if [ "$i" -eq 1 ]; then
+    seed="127.0.0.1:$((BASE_PORT+1))"
+  fi
+
+  PYTHONPATH="$ROOT/src" TWANSI_HOME="$home" python3 -m twansi.main init \
+    --nick "scale-$i" \
+    --listen "127.0.0.1:$p" \
+    --shard alpha \
+    --seed "$seed" >/dev/null
+
+done
+
+for i in $(seq 1 "$NODES"); do
+  home="$ROOT/.scale-$i"
+  p=$((BASE_PORT + i - 1))
+  (
+    PYTHONPATH="$ROOT/src" TWANSI_HOME="$home" TWANSI_DISABLE_UI=1 python3 -m twansi.main run >"/tmp/twansi-scale-$i.log" 2>&1
+  ) &
+  PIDS+=("$!")
+  sleep 0.2
+  echo "started node $i on $p"
+done
+
+sleep 6
+
+python3 - "$NODES" "$DURATION" "$BASE_PORT" <<'PY'
+import json
+import random
+import socket
+import statistics
+import sys
+import time
+
+N = int(sys.argv[1])
+DURATION = int(sys.argv[2])
+BASE = int(sys.argv[3])
+ports = [BASE + i for i in range(N)]
+agent_ports = [p + 100 for p in ports]
+
+
+def req(port, obj):
+    for _ in range(3):
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=2)
+            with s:
+                s.sendall((json.dumps(obj)+"\n").encode())
+                data = b""
+                while not data.endswith(b"\n"):
+                    c = s.recv(65536)
+                    if not c:
+                        break
+                    data += c
+            if not data:
+                return {"ok": False, "error": "no response"}
+            return json.loads(data.decode().strip())
+        except PermissionError:
+            time.sleep(0.2)
+            continue
+        except OSError as e:
+            return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": "socket permission/rate failure"}
+
+start = time.time()
+peer_samples = []
+tick_samples = []
+pending_samples = []
+action_ok = 0
+action_fail = 0
+
+while time.time() - start < DURATION:
+    chosen = random.sample(agent_ports, k=min(len(agent_ports), max(3, len(agent_ports)//3)))
+    for ap in chosen:
+        obs = req(ap, {"cmd": "observe"})
+        if not obs.get("ok"):
+            action_fail += 1
+            continue
+        st = obs["result"]
+        m = st["metrics"]
+        peer_samples.append(int(m.get("peer_count", 0)))
+        tick_samples.append(float(m.get("tick_ms", 0.0)))
+        pending_samples.append(int(m.get("pending_packets", 0)))
+        action = random.choice(["mine", "attack", "scan", "invite", "digest"])
+        r = req(ap, {"cmd": "act", "action": action})
+        if r.get("ok"):
+            action_ok += 1
+        else:
+            action_fail += 1
+    time.sleep(1.0)
+
+summary = {
+    "nodes": N,
+    "seconds": DURATION,
+    "actions_ok": action_ok,
+    "actions_fail": action_fail,
+    "peer_count_avg": round(statistics.mean(peer_samples), 2) if peer_samples else 0,
+    "peer_count_min": min(peer_samples) if peer_samples else 0,
+    "tick_ms_avg": round(statistics.mean(tick_samples), 3) if tick_samples else 0,
+    "pending_avg": round(statistics.mean(pending_samples), 3) if pending_samples else 0,
+}
+print("scale_summary", summary)
+
+if summary["peer_count_avg"] < max(1, N * 0.5):
+    raise SystemExit("peer mesh density too low")
+if summary["tick_ms_avg"] > 10:
+    raise SystemExit("tick time too high")
+PY
+
+echo "scale smoke complete"

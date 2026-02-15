@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+D1="$ROOT/.auto1"
+D2="$ROOT/.auto2"
+LOG1=/tmp/twansi-auto1.log
+LOG2=/tmp/twansi-auto2.log
+DURATION="${1:-60}"
+
+rm -rf "$D1" "$D2"
+mkdir -p "$D1" "$D2"
+
+PYTHONPATH="$ROOT/src" TWANSI_HOME="$D1" python3 -m twansi.main init --nick auto-alpha --listen 127.0.0.1:39210 --shard alpha --seed 127.0.0.1:39211 >/dev/null
+PYTHONPATH="$ROOT/src" TWANSI_HOME="$D2" python3 -m twansi.main init --nick auto-beta  --listen 127.0.0.1:39211 --shard alpha --seed 127.0.0.1:39210 >/dev/null
+
+(
+  PYTHONPATH="$ROOT/src" TWANSI_HOME="$D1" TWANSI_DISABLE_UI=1 python3 -m twansi.main run >"$LOG1" 2>&1
+) & PID1=$!
+(
+  PYTHONPATH="$ROOT/src" TWANSI_HOME="$D2" TWANSI_DISABLE_UI=1 python3 -m twansi.main run >"$LOG2" 2>&1
+) & PID2=$!
+
+cleanup(){
+  kill "$PID1" "$PID2" 2>/dev/null || true
+  wait "$PID1" "$PID2" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+sleep 4
+
+python3 - "$DURATION" <<'PY'
+import json
+import random
+import socket
+import sys
+import time
+
+DURATION = int(sys.argv[1])
+
+
+def req(port, obj):
+    s = socket.create_connection(("127.0.0.1", port), timeout=2)
+    with s:
+        s.sendall((json.dumps(obj)+"\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            c = s.recv(8192)
+            if not c:
+                break
+            data += c
+    if not data:
+        return {"ok": False, "error": "no response"}
+    return json.loads(data.decode().strip())
+
+
+def observe(port):
+    r = req(port, {"cmd":"observe"})
+    if not r.get("ok"):
+        return None
+    return r["result"]
+
+ports = [39310, 39311]
+start = time.time()
+last_pos = {39310: None, 39311: None}
+move_hits = {39310: 0, 39311: 0}
+attack_ok = 0
+invite_ok = 0
+mine_ok = 0
+errors = []
+
+while time.time() - start < DURATION:
+    for p in ports:
+        st = observe(p)
+        if not st:
+            errors.append(f"observe failed on {p}")
+            continue
+        peer_count = st["metrics"].get("peer_count", 0)
+        if peer_count < 1:
+            errors.append(f"peer_count<1 on {p}")
+
+        pos = (float(st["player"].get("pos_x", 0.0)), float(st["player"].get("pos_y", 0.0)))
+        if last_pos[p] and pos != last_pos[p]:
+            move_hits[p] += 1
+        last_pos[p] = pos
+
+        action = random.choice(["mine", "attack", "scan", "invite", "digest"])
+        r = req(p, {"cmd":"act", "action": action})
+        if action == "mine" and r.get("ok"):
+            mine_ok += 1
+        if action == "attack" and r.get("ok"):
+            attack_ok += 1
+        if action == "invite" and r.get("ok"):
+            invite_ok += 1
+    time.sleep(0.7)
+
+for p in ports:
+    if move_hits[p] < 3:
+        errors.append(f"insufficient movement updates on {p}: {move_hits[p]}")
+
+print("summary", {
+    "seconds": DURATION,
+    "mine_ok": mine_ok,
+    "attack_ok": attack_ok,
+    "invite_ok": invite_ok,
+    "movement_hits": move_hits,
+    "errors": errors[:10],
+})
+
+if errors:
+    # tolerate occasional transient but fail if too many
+    if len(errors) > 6:
+        raise SystemExit(2)
+PY
+
+echo "continuous smoke complete"

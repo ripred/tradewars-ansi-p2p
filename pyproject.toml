@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twansi"
+version = "0.1.0"
+description = "ANSI Tradewars-inspired P2P game for terminal"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "twansi contributors"}]
+dependencies = []
+
+[project.scripts]
+twansi = "twansi.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

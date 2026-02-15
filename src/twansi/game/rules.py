@@ -1,0 +1,4 @@
+RESOURCE_TICK_SECONDS = 60
+STRATEGIC_TICK_SECONDS = 5
+DOCTRINES = ("assault", "siege", "defense")
+MAX_HP = 100

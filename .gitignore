@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+
+# Runtime data
+.data/
+.data2/
+.smoke*/
+.auto*/
+.scale-*/
+.demo*/
+
+# Logs and temp
+*.log
+/tmp/twansi*.log
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
