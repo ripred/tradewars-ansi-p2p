@@ -147,6 +147,7 @@ class GameEngine:
         p = self.store.get_player(player_id)
         if not p:
             return None
+        sector_id = int(p.get("sector", 1))
         x = float(p.get("pos_x", 0.0))
         y = float(p.get("pos_y", 0.0))
         vx = float(p.get("vel_x", 0.0))
@@ -171,6 +172,7 @@ class GameEngine:
             "event_type": "movement",
             "payload": {
                 "player_id": player_id,
+                "sector_id": sector_id,
                 "x": round(x, 3),
                 "y": round(y, 3),
                 "vx": round(vx, 3),
@@ -205,8 +207,5 @@ class GameEngine:
                         "payload": {"player_id": player_id, "before": shield, "after": new_shield},
                     }
                 )
-        movement = self.movement_tick(player_id)
-        if movement:
-            events.append(movement)
         tick_ms = (time.perf_counter() - start) * 1000
         return TickResult(events=events, tick_ms=tick_ms)

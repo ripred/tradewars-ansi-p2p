@@ -17,7 +17,14 @@ from twansi.config import Profile, load_profile, parse_listen, save_profile, twa
 from twansi.game.alliances import create_alliance, join_alliance, player_alliance
 from twansi.game.mapgen import ensure_map
 from twansi.game.market import drift_market, market_snapshot
-from twansi.game.rules import RESOURCE_TICK_SECONDS, STRATEGIC_TICK_SECONDS
+from twansi.game.rules import (
+    AP_MAX,
+    AP_REGEN_PERIOD_SECONDS,
+    AP_REGEN_PER_MINUTE,
+    MOVEMENT_TICK_SECONDS,
+    RESOURCE_TICK_SECONDS,
+    STRATEGIC_TICK_SECONDS,
+)
 from twansi.game.tech import TECH_DOMAINS, can_upgrade, tech_tree_spec, tier_cost, upgrade_tech
 from twansi.game.tick import GameEngine
 from twansi.game.ship import ship_stats
@@ -52,7 +59,8 @@ class GameNode:
         shard_key = profile.shard_key or derive_shard_key(profile.shard, self.policy.protocol_epoch)
         self.shard_auth = ShardAuthenticator(shard_key)
         self.store = Store(profile.db_path)
-        ensure_map(self.store, sectors=96)
+        self.store.configure_world(profile.shard, self.policy.protocol_epoch)
+        ensure_map(self.store, sectors=96, shard=profile.shard, epoch=self.policy.protocol_epoch)
         self.store.ensure_player(self.identity.sender_id, profile.nick, doctrine=random.choice(["assault", "siege", "defense"]))
 
         self.engine = GameEngine(self.store)
@@ -77,6 +85,7 @@ class GameNode:
         self.state_lock = threading.Lock()
         self.last_resource_tick = time.time()
         self.last_strategic_tick = time.time()
+        self.last_movement_tick = time.time()
         self.last_announce_second = -1
         self.last_snapshot_second = -1
         self.last_bootstrap_ts = 0.0
@@ -106,24 +115,61 @@ class GameNode:
             self.store.regen_ap(self.identity.sender_id)
             player = self.store.get_player(self.identity.sender_id) or player
         tech_levels = self.store.get_tech_levels(self.identity.sender_id)
+        my_sector = int(player.get("sector", 0) or 0) if player else 0
+        now = time.time()
         contacts: list[dict[str, Any]] = []
         for p in healthy:
             rp = self.store.get_player(p.peer_id)
             if not rp:
                 continue
+            if my_sector and int(rp.get("sector", 0) or 0) != my_sector:
+                continue
+            motion_ts = float(rp.get("motion_ts", 0.0) or 0.0)
+            x0 = float(rp.get("pos_x", 0.0))
+            y0 = float(rp.get("pos_y", 0.0))
+            vx = float(rp.get("vel_x", 0.0))
+            vy = float(rp.get("vel_y", 0.0))
             contacts.append(
                 {
                     "id": p.peer_id,
                     "nick": rp.get("nick", p.nick),
-                    "x": float(rp.get("pos_x", 0.0)),
-                    "y": float(rp.get("pos_y", 0.0)),
+                    "sector": int(rp.get("sector", 0) or 0),
+                    "pos_x": x0,
+                    "pos_y": y0,
+                    "vel_x": vx,
+                    "vel_y": vy,
+                    "motion_ts": motion_ts,
                 }
             )
+        timers = {
+            "resource": {
+                "remaining": max(0.0, RESOURCE_TICK_SECONDS - (now - self.last_resource_tick)),
+                "period": RESOURCE_TICK_SECONDS,
+            },
+            "strategic": {
+                "remaining": max(0.0, STRATEGIC_TICK_SECONDS - (now - self.last_strategic_tick)),
+                "period": STRATEGIC_TICK_SECONDS,
+            },
+            "movement": {
+                "remaining": max(0.0, MOVEMENT_TICK_SECONDS - (now - self.last_movement_tick)),
+                "period": MOVEMENT_TICK_SECONDS,
+            },
+        }
+        ap_next_in = 0.0
+        try:
+            ap = int(player.get("ap", 0) or 0)
+            if ap < AP_MAX:
+                last = float(player.get("ap_updated_ts", 0.0) or 0.0)
+                if last > 0:
+                    ap_next_in = max(0.0, AP_REGEN_PERIOD_SECONDS - ((now - last) % AP_REGEN_PERIOD_SECONDS))
+        except Exception:
+            ap_next_in = 0.0
         return {
             "player": player,
             "contacts": contacts,
             "market": market_snapshot(self.store),
             "station": self.store.station_market(int(player.get("sector", 1))) if player else {},
+            "port": self.store.port_info(int(player.get("sector", 1))) if player else None,
             "nav": {"warps": self.store.list_warps(int(player.get("sector", 1))) if player else []},
             "tech": {
                 "levels": tech_levels,
@@ -138,7 +184,13 @@ class GameNode:
                 "netsplit": self.netsplit.split_active,
                 "merge_count": self.netsplit.merge_count,
                 "tick_ms": self.runtime.tick_ms,
+                "timers": timers,
+                "ap_next_in": ap_next_in,
+                "ap_period": AP_REGEN_PERIOD_SECONDS,
+                "ap_max": AP_MAX,
+                "ap_regen_per_minute": AP_REGEN_PER_MINUTE,
             },
+            "timestamp": now,
             "new_events": self.drain_new_events(),
         }
 
@@ -206,6 +258,8 @@ class GameNode:
                 self.store.update_player_resources(pid, 0, 0, 0, 0, hp=int(payload.get("hp_after", p["hp"])))
         elif et == "movement" and pid:
             self.store.ensure_player(pid, payload.get("nick", pid[:8]))
+            if "sector_id" in payload:
+                self.store.set_player_sector(pid, int(payload.get("sector_id", 1)))
             self.store.set_player_motion(
                 pid,
                 float(payload.get("x", 0.0)),
@@ -244,6 +298,8 @@ class GameNode:
             qty = int(payload.get("qty", 0))
             side = str(payload.get("side", "buy"))
             credits_delta = int(payload.get("credits_delta", 0))
+            sector_id = int(payload.get("sector_id", 0) or 0)
+            venue = str(payload.get("venue", "station"))
             ore = gas = crystal = 0
             sign = 1 if side == "buy" else -1
             if resource == "ore":
@@ -253,6 +309,16 @@ class GameNode:
             elif resource == "crystal":
                 crystal = sign * qty
             self.store.update_player_resources(pid, credits_delta, ore, gas, crystal)
+            # Port/station inventories converge by applying trade deltas everywhere.
+            if venue == "port" and sector_id > 0:
+                pclass = str(payload.get("port_class", ""))
+                if pclass:
+                    self.store.ensure_port(sector_id, port_class=pclass)
+                delta = -qty if side == "buy" else qty
+                self.store.adjust_port_stock(sector_id, resource, delta)
+            if venue == "station" and sector_id > 0:
+                delta = -qty if side == "buy" else qty
+                self.store.adjust_station_stock(sector_id, resource, delta)
         elif et == "tech_upgrade" and pid:
             self.store.ensure_player(pid, payload.get("nick", pid[:8]))
             domain = str(payload.get("domain", "ship_hull"))
@@ -466,7 +532,13 @@ class GameNode:
         try:
             p = self.store.get_player(self.identity.sender_id) or {}
             sector_id = int(p.get("sector", 1))
-            trade = self.store.station_trade(self.identity.sender_id, sector_id, resource, qty, side)
+            # Prefer port trading if a port exists in this sector, otherwise use station market.
+            if self.store.port_info(sector_id):
+                trade = self.store.port_trade(self.identity.sender_id, sector_id, resource, qty, side)
+                trade["venue"] = "port"
+            else:
+                trade = self.store.station_trade(self.identity.sender_id, sector_id, resource, qty, side)
+                trade["venue"] = "station"
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         ev = {"player_id": self.identity.sender_id, "nick": self.profile.nick, **trade}
@@ -499,6 +571,14 @@ class GameNode:
             return self._action_attack()
         if action == "scan":
             self._scan()
+            p = self.store.get_player(self.identity.sender_id) or {}
+            sector_id = int(p.get("sector", 1))
+            warps = self.store.list_warps(sector_id)
+            port = self.store.port_info(sector_id)
+            s = self.store.get_sector(sector_id) or {}
+            self.log_event(
+                f"scan/sec {sector_id} warps={warps[:10]} port={'yes' if port else 'no'} owner={(s.get('owner_player_id') or '-')[:8]} defL={s.get('defense_level',0)}"
+            )
             return {"ok": True, "result": "scan"}
         if action == "invite":
             try:
@@ -623,13 +703,21 @@ class GameNode:
                     ev["payload"]["nick"] = self.profile.nick
                     self._emit_event(ev["event_type"], ev["payload"])
 
+            if now - self.last_movement_tick >= MOVEMENT_TICK_SECONDS:
+                mv = self.engine.movement_tick(self.identity.sender_id)
+                self.last_movement_tick = now
+                if mv:
+                    mv["payload"]["nick"] = self.profile.nick
+                    # Movement is high frequency: do not use reliable delivery.
+                    self._emit_event(mv["event_type"], mv["payload"])
+
             if now - self.last_resource_tick >= RESOURCE_TICK_SECONDS:
                 ev = self.engine.resource_tick_for_player(self.identity.sender_id)
                 self.last_resource_tick = now
                 if ev:
                     ev["payload"]["nick"] = self.profile.nick
                     self._emit_event(ev["event_type"], ev["payload"])
-                drift_market(self.store)
+                drift_market(self.store, now_ts=now)
 
             while True:
                 try:
@@ -653,6 +741,14 @@ class GameNode:
                     self.do_action("buy", {"resource": "ore", "qty": 8})
                 elif cmd == "n":
                     self.do_action("sell", {"resource": "ore", "qty": 8})
+                elif cmd == "f":
+                    self.do_action("buy", {"resource": "gas", "qty": 8})
+                elif cmd == "r":
+                    self.do_action("sell", {"resource": "gas", "qty": 8})
+                elif cmd == "c":
+                    self.do_action("buy", {"resource": "crystal", "qty": 6})
+                elif cmd == "v":
+                    self.do_action("sell", {"resource": "crystal", "qty": 6})
                 elif cmd == "u":
                     self.do_action("upgrade")
                 elif cmd == "j":

@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 import random
+import hashlib
 
 
 class Store:
@@ -13,7 +14,26 @@ class Store:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        # These are set by GameNode at startup to make world/market deterministic per shard+epoch.
+        self.world_shard = "alpha"
+        self.world_epoch = 1
         self._init()
+
+    def configure_world(self, shard: str, epoch: int) -> None:
+        self.world_shard = str(shard or "alpha")
+        self.world_epoch = int(epoch)
+
+    def close(self) -> None:
+        try:
+            self.db.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "Store":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+        self.close()
 
     def _init(self) -> None:
         cur = self.db.cursor()
@@ -37,6 +57,7 @@ class Store:
                 pos_y REAL NOT NULL DEFAULT 0,
                 vel_x REAL NOT NULL DEFAULT 0,
                 vel_y REAL NOT NULL DEFAULT 0,
+                motion_ts REAL NOT NULL DEFAULT 0,
                 ap INTEGER NOT NULL DEFAULT 100,
                 ap_updated_ts REAL NOT NULL DEFAULT 0,
                 alliance_id TEXT,
@@ -95,6 +116,17 @@ class Store:
                 stock INTEGER NOT NULL,
                 PRIMARY KEY(sector_id, resource)
             );
+            CREATE TABLE IF NOT EXISTS ports (
+                sector_id INTEGER PRIMARY KEY,
+                port_class TEXT NOT NULL,
+                created_ts REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS port_inventory (
+                sector_id INTEGER NOT NULL,
+                resource TEXT NOT NULL,
+                stock INTEGER NOT NULL,
+                PRIMARY KEY(sector_id, resource)
+            );
             CREATE TABLE IF NOT EXISTS warps (
                 sector_id INTEGER NOT NULL,
                 to_sector_id INTEGER NOT NULL,
@@ -112,6 +144,7 @@ class Store:
         self._migrate_sectors_table()
         self._init_market()
         self._init_stations()
+        self._init_ports()
         self.db.commit()
 
     def _migrate_players_table(self) -> None:
@@ -121,6 +154,7 @@ class Store:
             "pos_y": "ALTER TABLE players ADD COLUMN pos_y REAL NOT NULL DEFAULT 0",
             "vel_x": "ALTER TABLE players ADD COLUMN vel_x REAL NOT NULL DEFAULT 0",
             "vel_y": "ALTER TABLE players ADD COLUMN vel_y REAL NOT NULL DEFAULT 0",
+            "motion_ts": "ALTER TABLE players ADD COLUMN motion_ts REAL NOT NULL DEFAULT 0",
             "ap": "ALTER TABLE players ADD COLUMN ap INTEGER NOT NULL DEFAULT 100",
             "ap_updated_ts": "ALTER TABLE players ADD COLUMN ap_updated_ts REAL NOT NULL DEFAULT 0",
             "shield": "ALTER TABLE players ADD COLUMN shield INTEGER NOT NULL DEFAULT 0",
@@ -219,6 +253,193 @@ class Store:
         # call ensure_station_inventory(sector_id).
         return
 
+    def _init_ports(self) -> None:
+        # Ports are lazily created per sector by ensure_port().
+        return
+
+    def _seed64(self, *parts: Any) -> int:
+        s = "|".join(str(p) for p in parts)
+        h = hashlib.sha256(s.encode("utf-8")).digest()
+        return int.from_bytes(h[:8], "big", signed=False)
+
+    def ensure_port(self, sector_id: int, port_class: str | None = None, stock: dict[str, int] | None = None) -> None:
+        sector_id = int(sector_id)
+        row = self.db.execute("SELECT port_class FROM ports WHERE sector_id=?", (sector_id,)).fetchone()
+        if row:
+            return
+        # Port classes loosely inspired by Tradewars: different commodities favored.
+        classes = ["BBS", "BSS", "SBB", "SSB", "BSB", "SBS"]
+        if port_class and port_class in classes:
+            pclass = str(port_class)
+        else:
+            # Deterministic fallback: sector_id -> class (no shared RNG required).
+            pclass = classes[self._seed64("twansi-port-class", self.world_shard, self.world_epoch, sector_id) % len(classes)]
+        self.db.execute(
+            "INSERT OR IGNORE INTO ports(sector_id,port_class,created_ts) VALUES(?,?,?)",
+            (sector_id, pclass, time.time()),
+        )
+        # Initialize inventory
+        s = self.get_sector(sector_id) or {"richness": 4, "danger": 5}
+        richness = int(s.get("richness", 4))
+        danger = int(s.get("danger", 5))
+        base = 300 + richness * 70 - danger * 12
+        base = max(120, base)
+        weights = {
+            "ore": 1.0,
+            "gas": 1.0,
+            "crystal": 1.0,
+        }
+        # Buy-heavy ports keep less stock (they want to buy from players).
+        if pclass[0] == "B":
+            weights["ore"] *= 0.7
+        else:
+            weights["ore"] *= 1.25
+        if pclass[1] == "B":
+            weights["gas"] *= 0.7
+        else:
+            weights["gas"] *= 1.25
+        if pclass[2] == "B":
+            weights["crystal"] *= 0.7
+        else:
+            weights["crystal"] *= 1.25
+        for res in ("ore", "gas", "crystal"):
+            if stock and res in stock:
+                s0 = int(stock[res])
+            else:
+                srng = random.Random(self._seed64("twansi-port-stock", self.world_shard, self.world_epoch, sector_id, res))
+                s0 = int(base * weights[res]) + srng.randint(0, 60)
+            self.db.execute(
+                "INSERT OR IGNORE INTO port_inventory(sector_id,resource,stock) VALUES(?,?,?)",
+                (sector_id, res, max(-999999, min(999999, s0))),
+            )
+        self.db.commit()
+
+    def adjust_port_stock(self, sector_id: int, resource: str, delta: int) -> None:
+        resource = resource.lower()
+        if resource not in ("ore", "gas", "crystal"):
+            return
+        sector_id = int(sector_id)
+        self.ensure_port(sector_id)
+        delta = int(delta)
+        self.db.execute(
+            "UPDATE port_inventory SET stock=stock+? WHERE sector_id=? AND resource=?",
+            (delta, sector_id, resource),
+        )
+        self.db.commit()
+
+    def port_info(self, sector_id: int) -> dict[str, Any] | None:
+        sector_id = int(sector_id)
+        row = self.db.execute("SELECT port_class FROM ports WHERE sector_id=?", (sector_id,)).fetchone()
+        if not row:
+            return None
+        pclass = str(row[0])
+        inv_rows = self.db.execute("SELECT resource,stock FROM port_inventory WHERE sector_id=?", (sector_id,)).fetchall()
+        inv = {str(r[0]): int(r[1]) for r in inv_rows}
+        base = self.get_market_prices()
+        # Spread and bias per class: B means port buys from player (higher bid, lower ask stock).
+        prices: dict[str, dict[str, int]] = {}
+        for idx, res in enumerate(("ore", "gas", "crystal")):
+            mode = pclass[idx]
+            stock = inv.get(res, 0)
+            # Smooth scarcity: allows negative stock (mesh-convergent deltas) without hard OOS errors.
+            target = 520.0
+            scarcity = 1.0 + ((target - float(stock)) / target) * 0.45
+            scarcity = max(0.75, min(1.8, scarcity))
+            mid = max(1, int(round(base.get(res, 5) * scarcity)))
+            spread = max(1, mid // 6)
+            if mode == "B":
+                bid = mid + spread
+                ask = mid + spread * 3
+            else:
+                bid = max(1, mid - spread * 3)
+                ask = mid - spread
+            prices[res] = {"bid": bid, "ask": max(1, ask)}
+        return {"sector_id": sector_id, "port_class": pclass, "prices": prices, "stock": inv}
+
+    def port_trade(self, player_id: str, sector_id: int, resource: str, qty: int, side: str) -> dict[str, Any]:
+        resource = resource.lower()
+        if resource not in ("ore", "gas", "crystal"):
+            raise ValueError("invalid resource")
+        qty = max(1, int(qty))
+        side = side.lower()
+        sector_id = int(sector_id)
+
+        p = self.get_player(player_id)
+        if not p:
+            raise ValueError("player not found")
+        if int(p["sector"]) != sector_id:
+            raise ValueError("not in that sector")
+
+        info = self.port_info(sector_id)
+        if not info:
+            raise ValueError("no port in sector")
+
+        mode_idx = {"ore": 0, "gas": 1, "crystal": 2}[resource]
+        mode = str(info["port_class"])[mode_idx]
+        stock = int(info["stock"][resource])
+        bid = int(info["prices"][resource]["bid"])
+        ask = int(info["prices"][resource]["ask"])
+
+        # fees lower than station to encourage port gameplay
+        if side == "buy":
+            if mode != "S":
+                raise ValueError("this port does not sell that commodity")
+            gross = ask * qty
+            fee = max(1, gross // 40)
+            total = gross + fee
+            if int(p["credits"]) < total:
+                raise ValueError("insufficient credits")
+            self.db.execute(
+                f"UPDATE players SET credits=credits-?, {resource}={resource}+?, updated_ts=? WHERE player_id=?",
+                (total, qty, time.time(), player_id),
+            )
+            self.db.execute(
+                "UPDATE port_inventory SET stock=stock-? WHERE sector_id=? AND resource=?",
+                (qty, sector_id, resource),
+            )
+            self.db.commit()
+            return {
+                "side": side,
+                "sector_id": sector_id,
+                "resource": resource,
+                "qty": qty,
+                "unit_price": ask,
+                "fee": fee,
+                "credits_delta": -total,
+                "port_class": str(info["port_class"]),
+            }
+
+        if side == "sell":
+            if mode != "B":
+                raise ValueError("this port does not buy that commodity")
+            if int(p[resource]) < qty:
+                raise ValueError("insufficient inventory")
+            gross = bid * qty
+            fee = max(1, gross // 50)
+            proceeds = max(1, gross - fee)
+            self.db.execute(
+                f"UPDATE players SET credits=credits+?, {resource}={resource}-?, updated_ts=? WHERE player_id=?",
+                (proceeds, qty, time.time(), player_id),
+            )
+            # port stock increases when buying from players
+            self.db.execute(
+                "UPDATE port_inventory SET stock=stock+? WHERE sector_id=? AND resource=?",
+                (qty, sector_id, resource),
+            )
+            self.db.commit()
+            return {
+                "side": side,
+                "sector_id": sector_id,
+                "resource": resource,
+                "qty": qty,
+                "unit_price": bid,
+                "fee": fee,
+                "credits_delta": proceeds,
+                "port_class": str(info["port_class"]),
+            }
+
+        raise ValueError("invalid side")
+
     def ensure_station_inventory(self, sector_id: int, richness: int | None = None, danger: int | None = None) -> None:
         sector_id = int(sector_id)
         row = self.db.execute("SELECT 1 FROM station_inventory WHERE sector_id=? LIMIT 1", (sector_id,)).fetchone()
@@ -231,11 +452,26 @@ class Store:
         base = 420 + richness * 60 - danger * 10
         base = max(120, base)
         for res, mult in (("ore", 1.2), ("gas", 1.0), ("crystal", 0.8)):
-            stock = int(base * mult) + random.randint(0, 50)
+            # Deterministic per shard+epoch+sector, so stations converge without a central server.
+            srng = random.Random(self._seed64("twansi-station-stock", self.world_shard, self.world_epoch, sector_id, res))
+            stock = int(base * mult) + srng.randint(0, 50)
             self.db.execute(
                 "INSERT OR IGNORE INTO station_inventory(sector_id,resource,stock) VALUES(?,?,?)",
                 (sector_id, res, stock),
             )
+        self.db.commit()
+
+    def adjust_station_stock(self, sector_id: int, resource: str, delta: int) -> None:
+        resource = resource.lower()
+        if resource not in ("ore", "gas", "crystal"):
+            return
+        sector_id = int(sector_id)
+        self.ensure_station_inventory(sector_id)
+        delta = int(delta)
+        self.db.execute(
+            "UPDATE station_inventory SET stock=stock+? WHERE sector_id=? AND resource=?",
+            (delta, sector_id, resource),
+        )
         self.db.commit()
 
     def station_modifier(self, sector_id: int) -> float:
@@ -439,8 +675,8 @@ class Store:
 
     def set_player_motion(self, player_id: str, pos_x: float, pos_y: float, vel_x: float, vel_y: float) -> None:
         self.db.execute(
-            "UPDATE players SET pos_x=?, pos_y=?, vel_x=?, vel_y=?, updated_ts=? WHERE player_id=?",
-            (pos_x, pos_y, vel_x, vel_y, time.time(), player_id),
+            "UPDATE players SET pos_x=?, pos_y=?, vel_x=?, vel_y=?, motion_ts=?, updated_ts=? WHERE player_id=?",
+            (pos_x, pos_y, vel_x, vel_y, time.time(), time.time(), player_id),
         )
         self.db.commit()
 

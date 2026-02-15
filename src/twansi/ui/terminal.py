@@ -37,7 +37,11 @@ class Dashboard:
         for i, line in enumerate(lines[: h - 2]):
             if color_pair:
                 win.attron(curses.color_pair(color_pair))
-            win.addnstr(i + 1, 1, line.ljust(w - 2), w - 2)
+            try:
+                win.addnstr(i + 1, 1, line.ljust(max(0, w - 2)), max(0, w - 2))
+            except curses.error:
+                # Terminal can be resized smaller than our layout; avoid crashing.
+                pass
             if color_pair:
                 win.attroff(curses.color_pair(color_pair))
 
@@ -74,9 +78,26 @@ class Dashboard:
                 self.push_event(ev)
 
             max_y, max_x = stdscr.getmaxyx()
-            rects = split_rect(max_y, max_x)
             stdscr.erase()
 
+            # Compact fallback for tiny panes (e.g. tmux splits). Avoid negative/too-small windows.
+            if max_y < 18 or max_x < 56:
+                self._draw_box(stdscr, "TWANSI (resize for full HUD)", Palette.TITLE)
+                state = self.state_cb()
+                for ev in state.get("new_events", []):
+                    self.push_event(ev)
+                lines = []
+                lines.extend(player_summary(state.get("player", {})))
+                lines.append("")
+                lines.extend(metrics_summary(state.get("metrics", {})))
+                lines.append("")
+                lines.append("Events:")
+                lines.extend(list(self.events)[: max(0, max_y - len(lines) - 3)])
+                self._draw_lines(stdscr, lines, Palette.WARN)
+                stdscr.refresh()
+                continue
+
+            rects = split_rect(max_y, max_x)
             py, px, ph, pw = rects["player"]
             my, mx, mh, mw = rects["metrics"]
             ry, rx, rh, rw = rects["radar"]
@@ -91,7 +112,8 @@ class Dashboard:
             self._draw_lines(w_player, player_summary(state.get("player", {})), Palette.GOOD)
 
             self._draw_box(w_metrics, "DASHBOARD", Palette.TITLE)
-            mlines = metrics_summary(state.get("metrics", {}))
+            metrics = state.get("metrics", {})
+            mlines = metrics_summary(metrics)
             prices = state.get("market", {}).get("prices", {})
             if prices:
                 mlines.append(f"Market O:{prices.get('ore',0)} G:{prices.get('gas',0)} C:{prices.get('crystal',0)}")
@@ -103,7 +125,15 @@ class Dashboard:
                     f"Station(sec {station.get('sector_id','?')}) O:{sp.get('ore',0)}/{st.get('ore',0)} "
                     f"G:{sp.get('gas',0)}/{st.get('gas',0)} C:{sp.get('crystal',0)}/{st.get('crystal',0)}"
                 )
-                owner = (state.get("station", {}) or {}).get("owner_player_id", None)
+            port = state.get("port", None)
+            if port:
+                pc = port.get("port_class", "?")
+                prices = port.get("prices", {})
+                mlines.append(
+                    f"Port {pc}  O:{prices.get('ore',{}).get('bid',0)}/{prices.get('ore',{}).get('ask',0)} "
+                    f"G:{prices.get('gas',{}).get('bid',0)}/{prices.get('gas',{}).get('ask',0)} "
+                    f"C:{prices.get('crystal',{}).get('bid',0)}/{prices.get('crystal',{}).get('ask',0)}"
+                )
             nav = state.get("nav", {}).get("warps", [])
             if nav:
                 mlines.append("Warps: " + ",".join(str(x) for x in nav[:12]) + (" ..." if len(nav) > 12 else ""))
@@ -125,8 +155,18 @@ class Dashboard:
                     f"Spd:{ship.get('speed',1.0)}"
                 )
             if self.show_help:
-                mlines.extend(["", "Keys: q quit | m mine | a attack | s scan | i invite | d digest | b buy ore | n sell ore | u upgrade | j jump | g defense | +/- zoom | h help"])
-            self._draw_lines(w_metrics, mlines, Palette.WARN)
+                mlines.extend(
+                    [
+                        "",
+                        "Keys: q quit | m mine | a attack | s scan | i invite | d digest | b/n ore buy/sell | f/r gas buy/sell | c/v crystal buy/sell | u upgrade | j jump | g defense | +/- zoom | h help",
+                    ]
+                )
+            bars = self._build_progress_bars(metrics, state.get("player", {}))
+            reserved_rows = len(bars) + 1 if bars else 0
+            text_limit = max(0, mh - 2 - reserved_rows)
+            self._draw_lines(w_metrics, mlines[:text_limit], Palette.WARN)
+            if bars:
+                self._draw_progress_bars(w_metrics, bars)
 
             self._draw_box(w_radar, "RADAR", Palette.TITLE)
             player = state.get("player", {})

@@ -15,7 +15,7 @@ PYTHONPATH="$ROOT/src" TWANSI_HOME="$D2" python3 -m twansi.main init --nick demo
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -n node1 "cd '$ROOT' && PYTHONPATH='$ROOT/src' TWANSI_HOME='$D1' python3 -m twansi.main run"
 tmux split-window -h -t "$SESSION":node1 "cd '$ROOT' && PYTHONPATH='$ROOT/src' TWANSI_HOME='$D2' python3 -m twansi.main run"
-tmux select-layout -t "$SESSION":node1 tiled
+tmux select-layout -t "$SESSION":node1 even-horizontal
 
 echo "tmux session started: $SESSION"
 echo "attach: tmux attach -t $SESSION"
