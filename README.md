@@ -88,6 +88,7 @@ TWANSI_HOME=$PWD/.data TWANSI_DISABLE_UI=1 twansi run
 - `b` / `n` buy/sell ore (AP cost)
 - `f` / `r` buy/sell gas (AP cost)
 - `c` / `v` buy/sell crystal (AP cost)
+- `B/N/F/R/C/V` open a prefilled buy/sell command you can edit (for custom quantities)
 - `u` upgrade next available tech tier (AP cost)
 - `j` jump to another sector (cheaper if it’s a direct warp; AP+gas cost)
 - `g` upgrade sector defenses (only if you own the sector; AP+resources)
@@ -105,6 +106,7 @@ Slash commands:
 - `/jump <sector>`
 - `/buy <res> <qty>`, `/sell <res> <qty>`
 - `/all create <name>`, `/all rename <name>`, `/all leave`, `/all kick <idprefix>`
+- `/help`
 
 The metrics panel already surfaces shared market prices plus station and port totals while the help overlay (`h`) reiterates these keys. `s` logs warp neighbors, current sector ownership/defense, and whether a port exists so you can spot trade targets before jumping. Trades triggered with `b/n`, `f/r`, or `c/v` are routed through the local port when one is present, otherwise they fall back to the per-sector station market highlighted on the dashboard.
 

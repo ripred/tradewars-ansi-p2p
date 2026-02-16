@@ -27,6 +27,11 @@ class Dashboard:
         stamp = time.strftime("%H:%M:%S")
         self.events.appendleft(f"[{stamp}] {text}")
 
+    def _start_cmd_input(self, preset: str = "") -> None:
+        self.input_active = True
+        self.input_kind = "cmd"
+        self.input_buf = preset
+
     def run(self) -> None:
         curses.wrapper(self._loop)
 
@@ -178,9 +183,7 @@ class Dashboard:
                     if key in ("1", "2", "3", "4", "5", "6", "7"):
                         self.mode = {"1": "hud", "2": "map", "3": "players", "4": "trade", "5": "alliance", "6": "chat", "7": "scores"}[key]
                     elif key == "/":
-                        self.input_active = True
-                        self.input_kind = "cmd"
-                        self.input_buf = ""
+                        self._start_cmd_input("")
                     elif key == "t":
                         self.input_active = True
                         self.input_kind = "say"
@@ -189,6 +192,18 @@ class Dashboard:
                         self.input_active = True
                         self.input_kind = "local"
                         self.input_buf = ""
+                    elif key == "B":
+                        self._start_cmd_input("buy ore 10")
+                    elif key == "N":
+                        self._start_cmd_input("sell ore 10")
+                    elif key == "F":
+                        self._start_cmd_input("buy gas 10")
+                    elif key == "R":
+                        self._start_cmd_input("sell gas 10")
+                    elif key == "C":
+                        self._start_cmd_input("buy crystal 6")
+                    elif key == "V":
+                        self._start_cmd_input("sell crystal 6")
                 if key == "q":
                     self.command_cb("quit")
                     return
@@ -283,6 +298,7 @@ class Dashboard:
                 self._draw_box(w_player, "TRADE", Palette.TITLE)
                 lines = [
                     "Hotkeys: b/n ore  f/r gas  c/v crystal",
+                    "Prompt: B/N ore  F/R gas  C/V crystal (edit qty, Enter)",
                     "Or commands: /buy ore 10  /sell gas 5",
                     "",
                 ]

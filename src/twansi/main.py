@@ -1098,6 +1098,12 @@ class GameNode:
                 self.do_action("alliance_kick", {"player_id": rest[0]})
             return
 
+        if op in ("help", "?"):
+            self.log_event("help: /say <t> | /local <t> | /attack <id> | /jump <sec> | /buy <res> <qty> | /sell <res> <qty>")
+            self.log_event("help: /all create|rename|leave|kick ...")
+            self.log_event("help: keys 1-7 screens, t/l chat input, B/N/F/R/C/V trade prompts")
+            return
+
         # Unknown command: show in log so the player isn't confused.
         self.log_event(f"unknown command: {raw}")
 
