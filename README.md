@@ -1,5 +1,11 @@
 # twansi
 
+[![JSON check](https://github.com/ripred/tradewars-ansi-p2p/actions/workflows/jsoncheck.yml/badge.svg)](https://github.com/ripred/tradewars-ansi-p2p/actions/workflows/jsoncheck.yml)
+[![CI](https://github.com/ripred/tradewars-ansi-p2p/actions/workflows/ci.yml/badge.svg)](https://github.com/ripred/tradewars-ansi-p2p/actions/workflows/ci.yml)
+[![License](https://flat.badgen.net/github/license/ripred/tradewars-ansi-p2p)](https://github.com/ripred/tradewars-ansi-p2p/blob/main/LICENSE)
+[![Stars](https://flat.badgen.net/github/stars/ripred/tradewars-ansi-p2p)](https://github.com/ripred/tradewars-ansi-p2p/stargazers)
+[![Forks](https://flat.badgen.net/github/forks/ripred/tradewars-ansi-p2p)](https://github.com/ripred/tradewars-ansi-p2p/network/members)
+
 `twansi` is a Tradewars-inspired ANSI terminal multiplayer space game with a serverless peer mesh (no central game server). It runs in a terminal, uses a curses dashboard, and supports optional headless agent control.
 
 ## What’s Implemented
